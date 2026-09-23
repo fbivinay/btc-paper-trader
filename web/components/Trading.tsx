@@ -199,6 +199,8 @@ const MODES = [
     ai: "Strategy and trades within high-risk limits" },
   { id: "ai_autonomous", icon: "🤖", name: "AI Autonomous",
     ai: "Allocation, strategy, entry, exit and position size" },
+  { id: "max_winrate", icon: "⚠️", name: "Max Win Rate",
+    ai: "Tiny targets, wide stops — 80% of trades win, the account still loses" },
 ] as const;
 
 const DURATIONS = [
@@ -207,6 +209,27 @@ const DURATIONS = [
   { label: "1 month", hours: 24 * 30 },
   { label: "Until I change it", hours: 0 },
 ];
+
+/** Shown whenever max_winrate is selected. The mode is real and selectable;
+ *  hiding what it does would make the dashboard dishonest. */
+function WinRateWarning() {
+  return (
+    <div className="mt-3 rounded border border-rose-900/60 bg-rose-950/25 p-3 text-xs
+                    leading-relaxed text-rose-200">
+      <div className="font-medium">This mode is a demonstration, not a strategy.</div>
+      <p className="mt-1.5 text-rose-300/90">
+        Measured over 90 days out of sample: <strong>80.1% of trades closed in
+        profit</strong> and the account still <strong>lost 17.6%</strong>. Each win
+        takes 0.20%; each loss gives back 5.00%. Two losses erase eight wins.
+      </p>
+      <p className="mt-1.5 text-rose-300/90">
+        A high win rate can be manufactured by moving the take-profit closer and the
+        stop further away. It says nothing about whether a system makes money. Watch
+        the equity curve, not the percentage.
+      </p>
+    </div>
+  );
+}
 
 export function ModeSelector({ profile, onSaved }: {
   profile: Profile | null; onSaved: () => void;
@@ -254,6 +277,7 @@ export function ModeSelector({ profile, onSaved }: {
           <div>
             <div className="text-sm font-medium text-zinc-100">{current.name}</div>
             <div className="text-xs text-zinc-500">AI controls: {current.ai}</div>
+            {profile?.risk_profile === "max_winrate" && <WinRateWarning />}
             {profile?.preference_until && (
               <div className="mt-0.5 text-[11px] text-amber-500">
                 Active until {new Date(profile.preference_until).toLocaleString()}
@@ -302,6 +326,8 @@ export function ModeSelector({ profile, onSaved }: {
               ))}
             </div>
           </div>
+
+          {mode === "max_winrate" && <WinRateWarning />}
 
           <button onClick={save} disabled={saving}
             className="rounded-md bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900

@@ -26,6 +26,7 @@ class RiskProfile:
     stop_atr_mult: float
     take_profit_r: float      # take profit as a multiple of the stop distance (R)
     fallback_min_conf: float  # absolute floor used only if a model ships no gates
+    fixed_stop: float | None = None   # overrides the ATR stop when set
 
 
 # risk_per_trade is small because the horizon is short. A 30-minute trade stops
@@ -51,6 +52,17 @@ PROFILES = {
     "balanced":      RiskProfile(0.0015, 2, 0.60, 0.10, 1.5, 1.5, 0.50),
     "aggressive":    RiskProfile(0.0030, 3, 1.00, 0.25, 1.2, 2.0, 0.40),
     "ai_autonomous": RiskProfile(0.0030, 4, 1.00, 0.25, 1.5, 2.0, 0.40),
+
+    # Tuned to maximise WIN RATE and nothing else, because that was asked for.
+    # Measured on 90 days out-of-sample: 80.1% of trades close green, and the
+    # account loses 17.6%. A 0.20% target against a 5.00% stop means each winner
+    # takes a fifth of a percent and each loser gives back five, so two losses
+    # erase eight wins.
+    #
+    # It is kept because it is the clearest demonstration in the project that
+    # win rate on its own is not a measure of anything. The dashboard shows the
+    # equity curve next to the win rate for exactly that reason.
+    "max_winrate":   RiskProfile(0.0030, 4, 1.00, 0.50, 1.0, 0.04, 0.30, fixed_stop=0.05),
 }
 
 
@@ -160,7 +172,8 @@ def approve(proposal: Proposal, state: PortfolioState, profile_name: str,
     # An ATR-derived stop means position size shrinks automatically when the
     # market gets violent, which is the whole point of sizing off volatility
     # rather than off a fixed percentage of capital.
-    stop_frac = max(proposal.atr_pct * p.stop_atr_mult, 0.002)
+    stop_frac = (p.fixed_stop if p.fixed_stop is not None
+                 else max(proposal.atr_pct * p.stop_atr_mult, 0.002))
     risk_amount = p.risk_per_trade * trading_capital
     notional = risk_amount / stop_frac
 
@@ -232,6 +245,14 @@ def _self_check() -> None:
     mid = Proposal("LONG", 0.70, 100000, 0.004)
     assert approve(mid, base_state, "balanced", model_gates=tight, **kw).rule == "low_confidence"
     assert approve(mid, base_state, "balanced", model_gates=loose, **kw).approved
+
+    # The win-rate profile must produce a target far tighter than its stop --
+    # that asymmetry is the entire reason its win rate is high.
+    wr = approve(Proposal("LONG", 0.9, 100000, 0.004), base_state, "max_winrate", **kw)
+    assert wr.approved, wr
+    up_move = wr.take_profit / 100000 - 1
+    down_move = 1 - wr.stop_loss / 100000
+    assert up_move < down_move / 10, (up_move, down_move)
 
     # Conservative is stricter than aggressive on the same model.
     assert (resolve_min_confidence("conservative", tight)
