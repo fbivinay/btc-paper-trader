@@ -51,11 +51,12 @@ export type Profile = {
   user_id: string;
   virtual_capital: number;
   trading_allocation: number;
-  risk_profile: "conservative" | "balanced" | "aggressive";
+  risk_profile: "conservative" | "balanced" | "aggressive" | "ai_autonomous";
   daily_profit_target: number;
   max_daily_loss: number;
   autonomous: boolean;
   active: boolean;
+  preference_until: string | null;
 };
 
 export type RiskEvent = {

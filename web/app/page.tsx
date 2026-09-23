@@ -2,27 +2,19 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import type {
-  Decision, Equity, ModelVersion, Position, Profile, RiskEvent,
-} from "@/lib/supabase";
+import type { Decision, Position, Profile } from "@/lib/supabase";
+import PriceChart from "@/components/PriceChart";
 import {
-  Card, EdgePanel, EquityChart, LatestDecision, Performance, Positions,
-  RecentRejections, Stat,
-} from "@/components/Panels";
-
-const usd = (n: number) =>
-  `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  ModeSelector, OpenPositions, Panel, Portfolio, TradeHistory,
+} from "@/components/Trading";
 
 export default function Dashboard() {
   const [ready, setReady] = useState(false);
   const [email, setEmail] = useState<string | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
-  const [decision, setDecision] = useState<Decision | null>(null);
-  const [risk, setRisk] = useState<RiskEvent | null>(null);
-  const [events, setEvents] = useState<RiskEvent[]>([]);
   const [positions, setPositions] = useState<Position[]>([]);
-  const [equity, setEquity] = useState<Equity[]>([]);
-  const [model, setModel] = useState<ModelVersion | null>(null);
+  const [decision, setDecision] = useState<Decision | null>(null);
+  const [price, setPrice] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     const db = supabase();
@@ -30,59 +22,59 @@ export default function Dashboard() {
     if (!user) { window.location.href = "/login"; return; }
     setEmail(user.email ?? null);
 
-    // Every one of these is fenced by RLS: the per-user tables return only this
-    // user's rows, and decisions/model_versions are readable by any signed-in user.
-    const [p, d, ev, pos, eq, mv] = await Promise.all([
+    const [p, pos, d] = await Promise.all([
       db.from("profiles").select("*").eq("user_id", user.id).single(),
+      db.from("positions").select("*").order("entry_time", { ascending: false }).limit(200),
       db.from("decisions").select("*").order("candle_time", { ascending: false }).limit(1),
-      db.from("risk_events").select("*").order("created_at", { ascending: false }).limit(200),
-      db.from("positions").select("*").order("entry_time", { ascending: false }).limit(100),
-      db.from("equity_snapshots").select("*").order("candle_time", { ascending: true }).limit(500),
-      db.from("model_versions").select("*").eq("status", "production").limit(1),
     ]);
-
     setProfile(p.data ?? null);
-    setDecision(d.data?.[0] ?? null);
-    setEvents(ev.data ?? []);
     setPositions(pos.data ?? []);
-    setEquity(eq.data ?? []);
-    setModel(mv.data?.[0] ?? null);
-    setRisk(
-      d.data?.[0]
-        ? (ev.data ?? []).find((e: RiskEvent) => e.decision_id === d.data[0].id) ?? null
-        : null
-    );
+    setDecision(d.data?.[0] ?? null);
     setReady(true);
   }, []);
 
   useEffect(() => {
     load();
-    // The loop writes one candle every 5 minutes; polling every 30s keeps the
-    // page fresh without a realtime subscription to maintain.
-    const t = setInterval(load, 30_000);
+    const t = setInterval(load, 20_000);
     return () => clearInterval(t);
   }, [load]);
+
+  // Live price, independent of the 5-minute loop, so unrealised P&L and the
+  // position table move continuously instead of stepping once per candle.
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const r = await fetch(
+          "https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT");
+        const j = await r.json();
+        if (alive) setPrice(Number(j.price));
+      } catch { /* a missed tick just leaves the previous price */ }
+    };
+    tick();
+    const t = setInterval(tick, 5_000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
 
   if (!ready)
     return <main className="min-h-dvh bg-zinc-950 p-6 text-sm text-zinc-500">Loading…</main>;
 
-  const capital = Number(profile?.virtual_capital ?? 0);
-  const latestEquity = equity.length ? Number(equity[equity.length - 1].equity) : capital;
-  const totalPnl = latestEquity - capital;
-  const openCount = positions.filter((p) => p.status === "OPEN").length;
+  const lapsed = profile?.preference_until
+    && new Date(profile.preference_until) < new Date();
 
   return (
     <main className="min-h-dvh bg-zinc-950 text-zinc-100">
-      <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6">
-        <header className="flex flex-wrap items-baseline justify-between gap-2">
-          <div>
-            <h1 className="text-xl font-semibold tracking-tight">BTC Paper Trader</h1>
-            <p className="mt-1 text-sm text-zinc-500">
-              Simulated trading, virtual capital, no real orders.
-            </p>
+      <header className="border-b border-zinc-900">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-4 py-3">
+          <div className="flex items-baseline gap-2">
+            <span className="text-sm font-semibold tracking-tight">BTC Paper Trader</span>
+            <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-zinc-400">
+              virtual
+            </span>
           </div>
           <div className="flex items-center gap-3 text-xs text-zinc-500">
-            <span>{email}</span>
+            <a href="/model" className="hover:text-zinc-300">Model</a>
+            <span className="hidden sm:inline">{email}</span>
             <button
               onClick={async () => { await supabase().auth.signOut(); window.location.href = "/login"; }}
               className="rounded border border-zinc-800 px-2 py-1 hover:border-zinc-600"
@@ -90,46 +82,67 @@ export default function Dashboard() {
               Sign out
             </button>
           </div>
-        </header>
+        </div>
+      </header>
 
-        <div className="mt-6 grid gap-4">
-          <Card title="Portfolio">
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-              <Stat label="Equity" value={usd(latestEquity)} />
-              <Stat label="Total P&L" value={`${totalPnl > 0 ? "+" : ""}${usd(totalPnl)}`}
-                    tone={totalPnl > 0 ? "up" : totalPnl < 0 ? "down" : undefined} />
-              <Stat label="Open positions" value={String(openCount)}
-                    sub={`${profile?.risk_profile ?? "—"} profile`} />
-              <Stat label="Starting capital" value={usd(capital)}
-                    sub={`${((profile?.trading_allocation ?? 0) * 100).toFixed(0)}% allocated`} />
-            </div>
-          </Card>
-
-          <EdgePanel model={model} />
-          <LatestDecision d={decision} risk={risk} />
-          <EquityChart data={equity} capital={capital} />
-
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Performance rows={positions} />
-            <RecentRejections events={events} />
+      <div className="mx-auto max-w-6xl space-y-4 px-4 py-5">
+        {lapsed && (
+          <div className="rounded-md border border-amber-900/60 bg-amber-950/25 px-4 py-2.5 text-sm text-amber-300">
+            Your trading preference expired on{" "}
+            {new Date(profile!.preference_until!).toLocaleString()}. No new positions
+            will open until you set a new one. Open positions are still managed to
+            their stop or target.
           </div>
+        )}
 
-          <Positions rows={positions} />
+        <Portfolio profile={profile} positions={positions} price={price} />
+        <PriceChart positions={positions} />
+
+        <div className="grid gap-4 lg:grid-cols-3">
+          <div className="lg:col-span-2">
+            <OpenPositions positions={positions} price={price} />
+          </div>
+          <ModeSelector profile={profile} onSaved={load} />
         </div>
 
-        <footer className="mt-10 border-t border-zinc-900 pt-6 text-xs leading-relaxed text-zinc-500">
-          <p>
-            Paper trading only. This system places no real orders and holds no
-            real funds. Nothing here is investment advice.
-          </p>
-          <p className="mt-2">
-            The model was selected by walk-forward validation across multiple
-            training windows and scored on trading economics rather than
-            classification accuracy. It does not currently clear transaction
-            costs, and the panel above shows that gap rather than hiding it.
-          </p>
-        </footer>
+        <TradeHistory positions={positions} />
+
+        {decision && (
+          <Panel title="Latest signal">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+              <Item k="Prediction" v={decision.prediction}
+                    tone={decision.prediction === "UP" ? "up"
+                        : decision.prediction === "DOWN" ? "down" : undefined} />
+              <Item k="Confidence" v={`${(decision.confidence * 100).toFixed(1)}%`} />
+              <Item k="Regime" v={decision.regime.replace(/_/g, " ")} />
+              <Item k="Strategy" v={decision.strategy.replace(/_/g, " ")} />
+              <Item k="Action" v={decision.action}
+                    tone={decision.action === "BUY" ? "up"
+                        : decision.action === "SELL" ? "down" : undefined} />
+              <span className="text-xs text-zinc-600">
+                {new Date(decision.candle_time).toLocaleTimeString()} ·{" "}
+                <a href="/model" className="underline decoration-zinc-700 hover:text-zinc-400">
+                  how this is decided
+                </a>
+              </span>
+            </div>
+          </Panel>
+        )}
+
+        <p className="pb-6 text-xs text-zinc-600">
+          Paper trading only. No real orders, no real funds. Not investment advice.
+        </p>
       </div>
     </main>
+  );
+}
+
+function Item({ k, v, tone }: { k: string; v: string; tone?: "up" | "down" }) {
+  return (
+    <span>
+      <span className="text-zinc-500">{k} </span>
+      <span className={tone === "up" ? "text-emerald-400"
+                     : tone === "down" ? "text-rose-400" : "text-zinc-100"}>{v}</span>
+    </span>
   );
 }

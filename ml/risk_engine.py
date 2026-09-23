@@ -41,10 +41,16 @@ class RiskProfile:
 # of all candles in one quarter and none at all in the next. Each promoted model
 # ships its own confidence distribution and the percentile is resolved against
 # that; see resolve_min_confidence.
+#
+# ai_autonomous is the widest mandate, not an unlimited one. The user sets
+# capital and a maximum daily loss; the system chooses allocation, strategy,
+# sizing and timing within that. It still cannot bypass approve() -- the daily
+# loss limit, the exposure ceiling and the no-leverage rule apply to every mode.
 PROFILES = {
-    "conservative": RiskProfile(0.0005, 1, 0.35, 0.05, 2.0, 1.5, 0.60),
-    "balanced":     RiskProfile(0.0015, 2, 0.60, 0.10, 1.5, 1.5, 0.50),
-    "aggressive":   RiskProfile(0.0030, 3, 1.00, 0.25, 1.2, 2.0, 0.40),
+    "conservative":  RiskProfile(0.0005, 1, 0.35, 0.05, 2.0, 1.5, 0.60),
+    "balanced":      RiskProfile(0.0015, 2, 0.60, 0.10, 1.5, 1.5, 0.50),
+    "aggressive":    RiskProfile(0.0030, 3, 1.00, 0.25, 1.2, 2.0, 0.40),
+    "ai_autonomous": RiskProfile(0.0030, 4, 1.00, 0.25, 1.5, 2.0, 0.40),
 }
 
 
