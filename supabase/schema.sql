@@ -176,3 +176,10 @@ drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function handle_new_user();
+
+-- PostgREST exposes every public function as an RPC endpoint, so without this
+-- revoke an anonymous caller could invoke handle_new_user() directly at
+-- /rest/v1/rpc/handle_new_user -- with SECURITY DEFINER privileges. Supabase's
+-- security advisor flags it as lint 0028/0029. The trigger is unaffected: it
+-- fires as the table owner, not as the caller.
+revoke execute on function public.handle_new_user() from public, anon, authenticated;
