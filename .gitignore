@@ -2,6 +2,9 @@
 # and it would be stale the moment it was committed.
 data/
 artifacts/
+# models/ is tracked on purpose: the promoted checkpoint is ~245KB and
+# versioning it with the code keeps every decision reproducible.
+!models/
 kaggle/code/*.py
 
 # Secrets. Nothing here should ever exist, but make it impossible by accident.

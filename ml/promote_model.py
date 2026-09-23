@@ -124,9 +124,12 @@ def register(db: DB, results_path: Path, dry_run: bool = False) -> None:
 
     promote = best["passes"] and beats_incumbent
     version = f"lstm-h{HORIZON}-w{best['window_days']}-{stamp}"
-    artifact = str(ROOT / "artifacts" / "artifacts" /
-                   f"model_h{HORIZON}_w{best['window_days']}_"
-                   f"{summary[0]['folds'][-1]['test_to']}.pt")
+    # Stored RELATIVE to the repo root. An absolute path works locally and
+    # breaks the moment CI loads it, which is exactly how this was found.
+    src = (ROOT / "artifacts" / "artifacts" /
+           f"model_h{HORIZON}_w{best['window_days']}_"
+           f"{summary[0]['folds'][-1]['test_to']}.pt")
+    artifact = f"models/{version}.pt"
 
     row = {
         "version": version,
@@ -155,6 +158,17 @@ def register(db: DB, results_path: Path, dry_run: bool = False) -> None:
     if dry_run:
         print("\n[dry run, nothing written]")
         return
+
+    # Checkpoints are ~245KB, so they live in the repo rather than object
+    # storage: the model that produced any decision stays recoverable from git
+    # history, and CI needs no extra credentials to fetch it.
+    if src.exists():
+        dest = ROOT / artifact
+        dest.parent.mkdir(exist_ok=True)
+        dest.write_bytes(src.read_bytes())
+        print(f"copied checkpoint -> {artifact}")
+    else:
+        print(f"WARNING: checkpoint not found at {src}")
 
     if promote and incumbent:
         # The partial unique index allows only one production row, so the old one

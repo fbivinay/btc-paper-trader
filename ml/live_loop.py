@@ -28,6 +28,7 @@ import os
 import sys
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -42,6 +43,7 @@ from config import COST, HORIZON, horizon_label
 from db import DB, DBError, load_env
 from train import SEQ_LEN, LSTMClassifier, NOT_FEATURES
 
+ROOT = Path(__file__).resolve().parent.parent
 BINANCE = "https://api.binance.com/api/v3/klines"
 SYMBOL = "BTCUSDT"
 INTERVAL = "5m"
@@ -110,9 +112,13 @@ def load_production_model(db: DB, dry_run: bool = False):
         sys.exit("no production model. Run: python ml/promote_model.py")
     row = rows[0]
 
-    path = row["metrics"].get("artifact")
-    if not path or not os.path.exists(path):
-        sys.exit(f"production model {row['version']} points at a missing file: {path!r}")
+    # Paths are stored relative to the repo root so the same row resolves on a
+    # developer machine and on a CI runner.
+    rel = row["metrics"].get("artifact")
+    path = ROOT / rel if rel else None
+    if not path or not path.exists():
+        sys.exit(f"production model {row['version']} points at a missing file: {rel!r} "
+                 f"(looked in {ROOT})")
 
     # weights_only=True: checkpoints are tensors and plain types only, so
     # loading one cannot execute code even if the file were tampered with.
