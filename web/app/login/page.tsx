@@ -18,9 +18,17 @@ export default function Login() {
     const { error } =
       mode === "in"
         ? await db.auth.signInWithPassword({ email, password })
-        : await db.auth.signUp({ email, password });
+        : await db.auth.signUp({
+            email,
+            password,
+            // Must point at the callback route: the confirmation link returns a
+            // PKCE code that has to be exchanged for a session. Sending it to /
+            // leaves the user confirmed but signed out.
+            options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
+          });
     if (error) setMsg(error.message);
-    else if (mode === "up") setMsg("Account created. Check your email if confirmation is on, then sign in.");
+    else if (mode === "up")
+      setMsg("Account created. Check your email for the confirmation link, then come back and sign in.");
     else window.location.href = "/";
     setBusy(false);
   }
