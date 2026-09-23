@@ -20,14 +20,18 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
 
 from config import (HORIZON, BARS_PER_DAY, COST as ROUND_TRIP_COST,
-                    THRESHOLD, THRESHOLD_MULT, horizon_label)
+                    THRESHOLD, THRESHOLD_MULT, LABEL_MODE, BARRIER_R,
+                    BARRIER_RR, BARRIER_MAX_HOLD, BREAKEVEN_WIN, horizon_label)
 
 DATA = Path(os.environ.get("BTC_DATA_DIR",
                            Path(__file__).resolve().parent.parent / "data"))
 SRC = DATA / "BTCUSDT_5m.parquet"
-OUT = DATA / f"BTCUSDT_5m_features_h{HORIZON}_t{THRESHOLD_MULT:g}.parquet"
+OUT = (DATA / (f"BTCUSDT_5m_features_barrier_r{BARRIER_R*1000:g}.parquet"
+               if LABEL_MODE == "barrier" else
+               f"BTCUSDT_5m_features_h{HORIZON}_t{THRESHOLD_MULT:g}.parquet"))
 
 
 def wilder(s: pd.Series, n: int) -> pd.Series:
@@ -117,6 +121,12 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return f
 
 
+# Every column that is derived from the future. train.py excludes these from the
+# feature set by importing this name rather than repeating the list, because the
+# lists drifted apart once already and the model was handed its own answer.
+LABEL_COLUMNS = {"label", "fwd_return", "barrier_return", "long_pnl", "short_pnl",
+                 "long_tp_bar", "long_sl_bar"}
+
 FUNDING_PER_DAY = 3        # paid every 8 hours
 
 
@@ -192,6 +202,84 @@ def add_sentiment_features(df: pd.DataFrame, fng: pd.DataFrame) -> pd.DataFrame:
                       / v.rolling(BARS_PER_DAY * 30, min_periods=BARS_PER_DAY).std()
                       .replace(0, np.nan))
     return f
+
+
+def add_barrier_labels(df: pd.DataFrame, R: float = BARRIER_R,
+                       rr: float = BARRIER_RR,
+                       max_hold: int = BARRIER_MAX_HOLD) -> pd.DataFrame:
+    """Label what a real trade would have done, not where price ended up.
+
+    For every candle, two hypothetical positions are opened at the next bar's
+    open and run forward until one of their barriers is touched:
+
+        LONG   target +rr*R   stop -R
+        SHORT  target -rr*R   stop +R
+
+    label 2 (UP)      the long reached its target before its stop
+    label 0 (DOWN)    the short reached its target before its stop
+    label 1 (NEUTRAL) neither did
+
+    These are mutually exclusive. If the long wins, price passed +R on the way
+    to +rr*R, so the short was already stopped out.
+
+    Why this and not a fixed-horizon label: a horizon label says "price was
+    higher in four hours", but a position with a stop can be closed at a loss
+    hours earlier and never see that price. Training on the horizon teaches the
+    model to answer a question the trading rule never asks.
+
+    Vectorised over sliding windows -- the windows are views, so only the
+    boolean comparison is materialised, and that is chunked to bound memory.
+    """
+    o = df["open"].to_numpy(np.float64)
+    h = df["high"].to_numpy(np.float64)
+    l = df["low"].to_numpy(np.float64)
+    n = len(o)
+
+    entry = np.roll(o, -1)                      # fill at the NEXT bar's open
+    NEVER = np.iinfo(np.int32).max
+    long_tp = np.full(n, NEVER, np.int64); long_sl = np.full(n, NEVER, np.int64)
+    short_tp = np.full(n, NEVER, np.int64); short_sl = np.full(n, NEVER, np.int64)
+
+    hw = sliding_window_view(h, max_hold)
+    lw = sliding_window_view(l, max_hold)
+    usable = len(hw) - 1
+    CHUNK = 40000
+    for s0 in range(0, usable, CHUNK):
+        s1 = min(s0 + CHUNK, usable)
+        e = entry[s0:s1][:, None]
+        H, L = hw[s0 + 1:s1 + 1], lw[s0 + 1:s1 + 1]
+        for arr, hit in (
+            (long_tp,  H >= e * (1 + R * rr)),
+            (long_sl,  L <= e * (1 - R)),
+            (short_tp, L <= e * (1 - R * rr)),
+            (short_sl, H >= e * (1 + R)),
+        ):
+            arr[s0:s1] = np.where(hit.any(1), hit.argmax(1), NEVER)
+
+    label = np.ones(n, dtype=np.int8)
+    label[long_tp < long_sl] = 2
+    label[short_tp < short_sl] = 0
+    # Beyond the last full window there is no future to resolve against.
+    label[usable:] = -1
+    # One return column cannot describe both directions. A long resolves on
+    # (+rr*R vs -R); a short resolves on (-rr*R vs +R). Those are different
+    # races down the same price path, and a candle can be a loss for one and a
+    # win for the other. So each direction gets its own realised trade return,
+    # positive meaning profit, and the caller picks the one it actually traded.
+    close = df["close"].to_numpy(np.float64)
+    timeout_i = np.minimum(np.arange(n) + max_hold, n - 1)
+    drift = close[timeout_i] / np.where(entry == 0, np.nan, entry) - 1
+
+    long_pnl = np.where(long_tp < long_sl, R * rr,
+                        np.where(long_sl < long_tp, -R, drift))
+    short_pnl = np.where(short_tp < short_sl, R * rr,
+                         np.where(short_sl < short_tp, -R, -drift))
+
+    return pd.DataFrame({
+        "label": label,
+        "long_pnl": long_pnl,
+        "short_pnl": short_pnl,
+    }, index=df.index)
 
 
 def add_labels(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
@@ -272,12 +360,25 @@ def main() -> None:
 
     sweep_thresholds(df)
 
-    threshold = THRESHOLD
+    if LABEL_MODE == "barrier":
+        lab = add_barrier_labels(df)
+        print(f"\nbarrier labels: R {BARRIER_R:.2%}  "
+              f"target {BARRIER_R*BARRIER_RR:.2%}  "
+              f"max hold {BARRIER_MAX_HOLD//12}h")
+        v = lab["label"][lab["label"] >= 0]
+        print(f"  DOWN {(v==0).mean():.1%}  NEUTRAL {(v==1).mean():.1%}  UP {(v==2).mean():.1%}")
+        print(f"  break-even win rate {BREAKEVEN_WIN:.1%} at {BARRIER_RR:g}:1 "
+              f"(a coin flip gets {1/(1+BARRIER_RR):.1%})")
+    else:
+        lab = add_labels(df, THRESHOLD)
     out = pd.concat([df[["open_time", "open", "high", "low", "close", "volume", "is_gap"]],
-                     feats, add_labels(df, threshold)], axis=1)
+                     feats, lab], axis=1)
 
     # Warmup rows (longest window is 7d vol percentile) and the unlabelled tail.
-    out = out.iloc[BARS_PER_DAY * 7:-HORIZON].reset_index(drop=True)
+    tail = BARRIER_MAX_HOLD + 1 if LABEL_MODE == "barrier" else HORIZON
+    out = out.iloc[BARS_PER_DAY * 7:-tail].reset_index(drop=True)
+    if LABEL_MODE == "barrier":
+        out = out[out["label"] >= 0].reset_index(drop=True)
     out = out.replace([np.inf, -np.inf], np.nan)
 
     feat_cols = list(feats.columns)
@@ -289,7 +390,9 @@ def main() -> None:
     out.to_parquet(OUT, index=False)
     counts = out["label"].value_counts(normalize=True).sort_index()
     print(f"\n{len(out):,} labelled rows, {len(feat_cols)} features -> {OUT}")
-    print(f"threshold {threshold:.4%}   DOWN {counts.get(0, 0):.1%}  "
+    label_desc = (f"barrier {BARRIER_R:.2%}/{BARRIER_R*BARRIER_RR:.2%}"
+                  if LABEL_MODE == "barrier" else f"threshold {THRESHOLD:.4%}")
+    print(f"{label_desc}   DOWN {counts.get(0, 0):.1%}  "
           f"NEUTRAL {counts.get(1, 0):.1%}  UP {counts.get(2, 0):.1%}")
 
 
@@ -352,6 +455,50 @@ def _self_check() -> None:
     sf = add_sentiment_features(c2, fng)
     pre = c2["open_time"] < ft2[1]
     assert (sf.loc[pre, "fng"] == (20 / 50 - 1)).all(), "sentiment leaked before publication"
+
+    # Barrier labels: a hand-built path with a known answer.
+    n2 = 3000
+    price = np.full(n2, 100.0)
+    price[10:] = 100.0
+    t2 = pd.date_range("2024-01-01", periods=n2, freq="5min", tz="UTC")
+    bd = pd.DataFrame({"open_time": t2, "open": price, "close": price,
+                       "high": price, "low": price,
+                       "volume": np.ones(n2), "trades": np.ones(n2)})
+    # From bar 0 (entry at bar 1) price rises 2% at bar 5: long target (+1.5%)
+    # is reached without the stop (-0.5%) ever being touched.
+    bd.loc[5, "high"] = 102.0
+    bl = add_barrier_labels(bd, R=0.005, rr=3.0, max_hold=100)
+    assert bl["label"].iloc[0] == 2, f"clean long win mislabelled: {bl['label'].iloc[0]}"
+
+    # Same rise, but the stop is touched first at bar 3 -- the long loses.
+    bd2 = bd.copy(); bd2.loc[3, "low"] = 99.0
+    bl2 = add_barrier_labels(bd2, R=0.005, rr=3.0, max_hold=100)
+    assert bl2["label"].iloc[0] != 2, "stop touched first must not label a win"
+
+    # Mirror: a 2% fall is a short win. Built from a clean frame, not from bd --
+    # bd already spikes high at bar 5, which would touch both targets at once.
+    bd3 = pd.DataFrame({"open_time": t2, "open": price, "close": price,
+                        "high": price, "low": price,
+                        "volume": np.ones(n2), "trades": np.ones(n2)})
+    bd3.loc[5, "low"] = 98.0
+    assert add_barrier_labels(bd3, R=0.005, rr=3.0, max_hold=100)["label"].iloc[0] == 0
+
+    # Each direction carries its own realised return, both positive when that
+    # direction wins. A price path that is a win for the long is a loss for the
+    # short, and one column could not say both.
+    lab_up = add_barrier_labels(bd, R=0.005, rr=3.0, max_hold=100)
+    lab_dn = add_barrier_labels(bd3, R=0.005, rr=3.0, max_hold=100)
+    assert lab_up["long_pnl"].iloc[0] > 0 and lab_up["short_pnl"].iloc[0] < 0,         "a long win must be a short loss"
+    assert lab_dn["short_pnl"].iloc[0] > 0 and lab_dn["long_pnl"].iloc[0] < 0,         "a short win must be a long loss"
+    # The winner collects rr times what the loser pays, with opposite signs.
+    assert abs(lab_up["long_pnl"].iloc[0] / lab_up["short_pnl"].iloc[0] + 3.0) < 1e-9
+
+    # Flat price reaches no barrier at all.
+    assert add_barrier_labels(bd.assign(high=price, low=price),
+                              R=0.005, rr=3.0, max_hold=100)["label"].iloc[0] == 1
+
+    # The last max_hold rows have no resolvable future and must be marked -1.
+    assert (add_barrier_labels(bd, R=0.005, rr=3.0, max_hold=100)["label"].iloc[-50:] == -1).all()
 
     print("self-check passed: no lookahead, labels use the future, features scale-free")
 

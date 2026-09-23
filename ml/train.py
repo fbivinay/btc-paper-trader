@@ -22,19 +22,28 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
-from config import HORIZON, THRESHOLD_MULT, horizon_label
+import features as F
+from config import (HORIZON, THRESHOLD_MULT, LABEL_MODE, BARRIER_R,
+                    BARRIER_RR, BREAKEVEN_WIN, horizon_label)
 from metrics import evaluate, DOWN, NEUTRAL, UP
+import metrics as _M
 
 DATA = Path(os.environ.get("BTC_DATA_DIR",
                            Path(__file__).resolve().parent.parent / "data"))
 ART = Path(os.environ.get("BTC_ARTIFACT_DIR",
                           Path(__file__).resolve().parent.parent / "artifacts"))
-SRC = DATA / f"BTCUSDT_5m_features_h{HORIZON}_t{THRESHOLD_MULT:g}.parquet"
+SRC = (DATA / (f"BTCUSDT_5m_features_barrier_r{BARRIER_R*1000:g}.parquet"
+               if LABEL_MODE == "barrier" else
+               f"BTCUSDT_5m_features_h{HORIZON}_t{THRESHOLD_MULT:g}.parquet"))
 
 SEQ_LEN = 120          # 120 x 5m = 10 hours of context
 BASE = "top100pct"          # the ungated gate name, used as the headline metric
+# Anything derived from the future belongs here. A label column that slips into
+# the feature set produces a model that looks extraordinary and knows nothing:
+# renaming barrier_return to long_pnl/short_pnl without updating this list gave
+# 96.5% precision and a Sharpe of 58 on a two-epoch smoke test.
 NOT_FEATURES = {"open_time", "open", "high", "low", "close", "volume",
-                "is_gap", "fwd_return", "label"}
+                "is_gap"} | F.LABEL_COLUMNS
 
 
 class SeqDataset(Dataset):
@@ -111,7 +120,18 @@ def predict(model, loader, device):
 def train_fold(df, feat_cols, tr_idx, te_idx, args, device):
     x_all = df[feat_cols].to_numpy(np.float32)
     y_all = df["label"].to_numpy(np.int64)
-    fwd_all = df["fwd_return"].to_numpy(np.float64)
+    # In barrier mode each trade's outcome is already a realised +rr*R / -R,
+    # so that is what the simulator scores. A fixed-horizon return would
+    # describe a different trade from the one the label describes.
+    if LABEL_MODE == "barrier":
+        # Each direction has its own realised outcome. simulate() computes
+        # direction * value, so the short leg is negated here to cancel that and
+        # leave a profit positive either way.
+        long_pnl = df["long_pnl"].to_numpy(np.float64)
+        short_pnl = df["short_pnl"].to_numpy(np.float64)
+        fwd_all = None
+    else:
+        fwd_all = df["fwd_return"].to_numpy(np.float64)
 
     # Scaler fitted on the training window only. Fitting it over the whole file
     # would leak the test period's mean and variance into training.
@@ -135,6 +155,12 @@ def train_fold(df, feat_cols, tr_idx, te_idx, args, device):
     if not len(tr) or not len(te):
         return None
 
+    def _returns(pred, idx):
+        """Returns aligned to what each prediction would actually have traded."""
+        if fwd_all is not None:
+            return fwd_all[idx]
+        return np.where(pred == UP, long_pnl[idx], -short_pnl[idx])
+
     mk = lambda idx, shuffle: DataLoader(
         SeqDataset(x, y_all, idx), batch_size=args.batch, shuffle=shuffle, num_workers=0)
     tr_dl, val_dl, te_dl = mk(tr, True), mk(val, False), mk(te, False)
@@ -153,7 +179,7 @@ def train_fold(df, feat_cols, tr_idx, te_idx, args, device):
         vp, vc = predict(model, val_dl, device)
         # Selected on validation trading return, not loss. Loss rewards being
         # confidently NEUTRAL, which earns nothing.
-        score = evaluate(vp, vc, fwd_all[val], y_all[val])["total_return"]
+        score = evaluate(vp, vc, _returns(vp, val), y_all[val])["total_return"]
         flag = ""
         if score > best:
             best, best_state, patience, flag = score, \
@@ -180,7 +206,7 @@ def train_fold(df, feat_cols, tr_idx, te_idx, args, device):
         gates = {"top100pct": 0.0}
 
     tp, tc = predict(model, te_dl, device)
-    res = {name: evaluate(tp, tc, fwd_all[te], y_all[te], min_conf=g)
+    res = {name: evaluate(tp, tc, _returns(tp, te), y_all[te], min_conf=g)
            for name, g in gates.items()}
     return {"metrics": res, "state": model.state_dict(), "mu": mu, "sd": sd,
             "n_train": len(tr), "n_test": len(te), "gates": gates,
@@ -212,12 +238,18 @@ def main() -> None:
         args.windows, args.folds, args.epochs, args.stride = [180], 1, 2, 12
         args.test_days, args.patience = 30, 99
 
+    if LABEL_MODE == "barrier":
+        # Selection proxy only: barrier holds vary, so a single spacing cannot
+        # be exact. 12h permits ~60 trades/month, near the intended range.
+        _M.HORIZON = 144
     torch.manual_seed(0)
     np.random.seed(0)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     df = pd.read_parquet(SRC)
     feat_cols = [c for c in df.columns if c not in NOT_FEATURES]
+    leaked = F.LABEL_COLUMNS & set(feat_cols)
+    assert not leaked, f"label columns leaked into the feature set: {sorted(leaked)}"
     print(f"{len(df):,} rows  {len(feat_cols)} features  horizon={horizon_label()}  device={device}")
 
     ART.mkdir(exist_ok=True)
@@ -264,7 +296,8 @@ def main() -> None:
                         "feat_cols": feat_cols, "seq_len": SEQ_LEN,
                         "window_days": w, "test_to": str(hi),
                         "hidden": args.hidden, "layers": args.layers},
-                       ART / f"model_h{HORIZON}_t{THRESHOLD_MULT:g}_w{w}_{hi}.pt")
+                       ART / ((f"model_barrier_r{BARRIER_R*1000:g}_w{w}_{hi}.pt") if LABEL_MODE == "barrier"
+                              else f"model_h{HORIZON}_t{THRESHOLD_MULT:g}_w{w}_{hi}.pt"))
 
         if per_fold:
             agg = {k: float(np.mean([f[BASE][k] for f in per_fold]))
@@ -283,7 +316,8 @@ def main() -> None:
             print(f"  MEAN  ret {agg['total_return']:+.2%} (sd {agg['return_std']:.2%})  "
                   f"sharpe {agg['sharpe']:+.2f}  profitable folds {agg['folds_profitable']}/{len(per_fold)}")
 
-    (ART / f"walkforward_h{HORIZON}_t{THRESHOLD_MULT:g}.json").write_text(json.dumps(summary, indent=2))
+    (ART / ((f"walkforward_barrier_r{BARRIER_R*1000:g}.json") if LABEL_MODE == "barrier"
+                        else f"walkforward_h{HORIZON}_t{THRESHOLD_MULT:g}.json")).write_text(json.dumps(summary, indent=2))
     print(f"\nwrote {ART / 'walkforward.json'}")
 
     if summary:

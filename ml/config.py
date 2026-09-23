@@ -61,6 +61,31 @@ THRESHOLD_MULT = float(os.environ.get("BTC_THRESHOLD_MULT", 3.0))
 THRESHOLD = COST * THRESHOLD_MULT
 
 
+# --- label definition -------------------------------------------------------
+#
+# "horizon": the label is the sign of the return at a fixed number of bars.
+# "barrier": the label is what a real trade would have done -- did the target
+#            get hit before the stop.
+#
+# Barrier labels are the honest ones, because they are the question the trading
+# rule actually asks. A horizon label says "price was higher in 4 hours"; a
+# position with a stop can be closed at a loss long before that and never see it.
+LABEL_MODE = os.environ.get("BTC_LABEL_MODE", "barrier")
+
+# Risk per trade as a fraction of entry price, and the reward multiple.
+#
+# R=0.5% with a 72h limit is chosen from data, not preference: it is the setting
+# where 99.7% of trades actually reach a barrier, so the payoff is a true 3:1
+# rather than a muddle of timeouts. At R=2% only 39% reach one.
+BARRIER_R = float(os.environ.get("BTC_BARRIER_R", 0.005))
+BARRIER_RR = float(os.environ.get("BTC_BARRIER_RR", 3.0))
+BARRIER_MAX_HOLD = int(os.environ.get("BTC_BARRIER_MAX_HOLD", 864))   # 72 hours
+
+# Break-even win rate at this reward ratio, including the round trip.
+#   p*rr*R - (1-p)*R - cost = 0  ->  p = (R + cost) / (R * (1 + rr))
+BREAKEVEN_WIN = (BARRIER_R + COST) / (BARRIER_R * (1 + BARRIER_RR))
+
+
 def cost_at(fill_rate: float) -> float:
     """Round-trip cost at an arbitrary maker fill rate, for sensitivity analysis."""
     return 2 * (fill_rate * FEE_MAKER + (1 - fill_rate) * FEE_TAKER + ADVERSE_SELECTION)
