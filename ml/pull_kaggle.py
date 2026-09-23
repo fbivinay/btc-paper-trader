@@ -32,7 +32,7 @@ def summarise() -> None:
     # file lands at artifacts/artifacts/walkforward.json while a stale local one
     # may still sit at artifacts/walkforward.json. Take the newest and say which,
     # rather than silently reporting last week's numbers as this run's.
-    found = sorted(ART.rglob("walkforward.json"), key=lambda p: p.stat().st_mtime)
+    found = sorted(ART.rglob("walkforward*.json"), key=lambda p: p.stat().st_mtime)
     if not found:
         print("no walkforward.json -- run did not reach the end of training")
         return

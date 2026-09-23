@@ -23,8 +23,16 @@ import os
 HORIZON = int(os.environ.get("BTC_HORIZON", 48))
 
 FEE = 0.001                  # Binance spot taker, each way
-SLIPPAGE = 0.0005
-COST = 2 * FEE + SLIPPAGE    # 0.25% round trip
+# Per leg, not per round trip. You slip going in and coming out, so both the
+# fee and the slippage are paid twice. An earlier version counted slippage once
+# and understated the cost floor by 5bp, which the paper engine caught by
+# disagreeing with it.
+#
+# 2.5bp is a fair-to-conservative estimate for small market orders on BTC/USDT,
+# the most liquid pair there is, where the spread itself is around 1bp. The fee
+# dominates regardless -- 20bp of the 25bp total.
+SLIPPAGE = 0.00025
+COST = 2 * (FEE + SLIPPAGE)   # 0.25% round trip
 
 BARS_PER_DAY = 288
 BARS_PER_YEAR = BARS_PER_DAY * 365
