@@ -21,18 +21,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from config import HORIZON, BARS_PER_DAY, COST as ROUND_TRIP_COST, horizon_label
+
 DATA = Path(os.environ.get("BTC_DATA_DIR",
                            Path(__file__).resolve().parent.parent / "data"))
 SRC = DATA / "BTCUSDT_5m.parquet"
-OUT = DATA / "BTCUSDT_5m_features.parquet"
-
-HORIZON = 6          # 6 x 5m = 30 minutes ahead
-BARS_PER_DAY = 288
-
-# Binance spot taker fee, paid on entry and exit, plus assumed slippage.
-FEE = 0.001
-SLIPPAGE = 0.0005
-ROUND_TRIP_COST = 2 * FEE + SLIPPAGE          # 0.25%
+OUT = DATA / f"BTCUSDT_5m_features_h{HORIZON}.parquet"
 
 
 def wilder(s: pd.Series, n: int) -> pd.Series:
@@ -176,6 +170,7 @@ def main() -> None:
     df = df.rename_axis("open_time").reset_index()
 
     print(f"{len(df):,} candles, {int(df['is_gap'].sum())} filled gaps")
+    print(f"horizon: {HORIZON} bars = {horizon_label()}")
 
     feats = add_indicators(df)
     sweep_thresholds(df)
@@ -221,12 +216,15 @@ def _self_check() -> None:
     lab2 = add_labels(df2, 0.0025)
     assert (lab["label"].iloc[200:] == lab2["label"].iloc[200:]).all(), "label reads the past"
 
-    # And it must depend on the future: moving the exit candle must move the label.
-    # Only open[t+1] and close[t+HORIZON] are read -- intermediate candles are not.
-    df3 = df.copy()
-    df3.loc[500 + HORIZON, "close"] *= 1.10
-    assert add_labels(df3, 0.0025)["label"].iloc[500] != lab["label"].iloc[500], \
-        "label ignores the future"
+    # And it must depend on the future: only open[t+1] and close[t+HORIZON] are
+    # read. Drive the exit candle to both extremes rather than nudging it -- at a
+    # long horizon the unperturbed label is often already directional, so a bump
+    # in one direction can legitimately leave it unchanged.
+    up_df, dn_df = df.copy(), df.copy()
+    up_df.loc[500 + HORIZON, "close"] = df["open"].iloc[501] * 1.10
+    dn_df.loc[500 + HORIZON, "close"] = df["open"].iloc[501] * 0.90
+    assert add_labels(up_df, 0.0025)["label"].iloc[500] == 2, "exit up must label UP"
+    assert add_labels(dn_df, 0.0025)["label"].iloc[500] == 0, "exit down must label DOWN"
 
     # Scale invariance: 10x the price, features must be unchanged.
     f1 = add_indicators(df)

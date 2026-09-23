@@ -11,11 +11,7 @@ never trades scores 68% accuracy and zero return. Selection uses these metrics.
 import numpy as np
 import pandas as pd
 
-FEE = 0.001
-SLIPPAGE = 0.0005
-COST = 2 * FEE + SLIPPAGE
-HORIZON = 6
-BARS_PER_YEAR = 288 * 365
+from config import COST, HORIZON, BARS_PER_YEAR
 
 DOWN, NEUTRAL, UP = 0, 1, 2
 
@@ -101,12 +97,16 @@ def _self_check() -> None:
     n = 1000
     fwd = np.zeros(n)
 
-    # A perfect predictor on moves that clear cost must be profitable.
-    fwd[::20] = 0.01
+    # A perfect predictor on moves that clear cost must be profitable. Signals are
+    # spaced wider than the horizon so every one is takeable regardless of how
+    # HORIZON is configured -- otherwise this test's expected count silently
+    # depends on the config it is meant to be independent of.
+    spacing = HORIZON + 10
+    fwd[::spacing] = 0.01
     pred = np.where(fwd > 0, UP, NEUTRAL)
     conf = np.ones(n)
     t = simulate(pred, conf, fwd)
-    assert len(t) == 50, f"expected 50 non-overlapping trades, got {len(t)}"
+    assert len(t) == len(range(0, n, spacing)), f"got {len(t)} trades"
     assert np.allclose(t["pnl"], 0.01 - COST), "pnl must be net of cost"
 
     # Non-overlap: signals on consecutive bars must collapse to one trade per horizon.

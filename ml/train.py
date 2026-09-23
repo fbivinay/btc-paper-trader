@@ -22,16 +22,16 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
+from config import HORIZON, horizon_label
 from metrics import evaluate, DOWN, NEUTRAL, UP
 
 DATA = Path(os.environ.get("BTC_DATA_DIR",
                            Path(__file__).resolve().parent.parent / "data"))
 ART = Path(os.environ.get("BTC_ARTIFACT_DIR",
                           Path(__file__).resolve().parent.parent / "artifacts"))
-SRC = DATA / "BTCUSDT_5m_features.parquet"
+SRC = DATA / f"BTCUSDT_5m_features_h{HORIZON}.parquet"
 
 SEQ_LEN = 120          # 120 x 5m = 10 hours of context
-BARS_PER_DAY = 288
 BASE = "top100pct"          # the ungated gate name, used as the headline metric
 NOT_FEATURES = {"open_time", "open", "high", "low", "close", "volume",
                 "is_gap", "fwd_return", "label"}
@@ -218,7 +218,7 @@ def main() -> None:
 
     df = pd.read_parquet(SRC)
     feat_cols = [c for c in df.columns if c not in NOT_FEATURES]
-    print(f"{len(df):,} rows  {len(feat_cols)} features  device={device}")
+    print(f"{len(df):,} rows  {len(feat_cols)} features  horizon={horizon_label()}  device={device}")
 
     ART.mkdir(exist_ok=True)
     summary = []
@@ -259,7 +259,7 @@ def main() -> None:
                         "feat_cols": feat_cols, "seq_len": SEQ_LEN,
                         "window_days": w, "test_to": str(hi),
                         "hidden": args.hidden, "layers": args.layers},
-                       ART / f"model_w{w}_{hi}.pt")
+                       ART / f"model_h{HORIZON}_w{w}_{hi}.pt")
 
         if per_fold:
             agg = {k: float(np.mean([f[BASE][k] for f in per_fold]))
@@ -278,7 +278,7 @@ def main() -> None:
             print(f"  MEAN  ret {agg['total_return']:+.2%} (sd {agg['return_std']:.2%})  "
                   f"sharpe {agg['sharpe']:+.2f}  profitable folds {agg['folds_profitable']}/{len(per_fold)}")
 
-    (ART / "walkforward.json").write_text(json.dumps(summary, indent=2))
+    (ART / f"walkforward_h{HORIZON}.json").write_text(json.dumps(summary, indent=2))
     print(f"\nwrote {ART / 'walkforward.json'}")
 
     if summary:

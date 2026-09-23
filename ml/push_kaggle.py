@@ -19,7 +19,8 @@ ROOT = Path(__file__).resolve().parent.parent
 CODE_SRC = ROOT / "ml"
 CODE_OUT = ROOT / "kaggle" / "code"
 KERNEL = ROOT / "kaggle"
-MODULES = ["fetch_history.py", "features.py", "metrics.py", "train.py"]
+MODULES = ["config.py", "fetch_history.py", "features.py", "metrics.py",
+           "risk_engine.py", "train.py"]
 
 
 def sh(cmd: list[str], check: bool = True) -> str:

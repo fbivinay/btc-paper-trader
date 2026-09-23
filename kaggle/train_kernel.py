@@ -15,7 +15,10 @@ import sys
 CODE = "/kaggle/input/btc-trading-code"
 WORK = "/kaggle/working"
 
-os.environ["BTC_DATA_DIR"] = f"{WORK}/data"
+# Rebuilt data goes to /tmp, not /kaggle/working: it is 165MB, it is
+# reproducible from data.binance.vision, and anything left in the working
+# directory has to be downloaded again on every pull.
+os.environ["BTC_DATA_DIR"] = "/tmp/btcdata"
 os.environ["BTC_ARTIFACT_DIR"] = f"{WORK}/artifacts"
 os.makedirs(os.environ["BTC_DATA_DIR"], exist_ok=True)
 os.makedirs(os.environ["BTC_ARTIFACT_DIR"], exist_ok=True)

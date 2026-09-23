@@ -28,10 +28,18 @@ def sh(cmd: list[str], check: bool = True) -> str:
 
 
 def summarise() -> None:
-    path = ART / "walkforward.json"
-    if not path.exists():
+    # Kaggle nests its output under the working-directory structure, so the real
+    # file lands at artifacts/artifacts/walkforward.json while a stale local one
+    # may still sit at artifacts/walkforward.json. Take the newest and say which,
+    # rather than silently reporting last week's numbers as this run's.
+    found = sorted(ART.rglob("walkforward.json"), key=lambda p: p.stat().st_mtime)
+    if not found:
         print("no walkforward.json -- run did not reach the end of training")
         return
+    path = found[-1]
+    print(f"\nreading {path.relative_to(ART.parent)}")
+    if len(found) > 1:
+        print(f"  ({len(found) - 1} older copy/copies ignored)")
     summary = json.loads(path.read_text())
     if not summary:
         print("walkforward.json is empty")
