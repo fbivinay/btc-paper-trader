@@ -31,7 +31,7 @@ if torch.cuda.is_available():
 else:
     print("WARNING: no GPU. Enable it in kernel settings or this runs ~40x slower.", flush=True)
 
-for step in ("fetch_history", "features"):
+for step in ("fetch_history", "fetch_funding", "features"):
     print(f"\n===== {step} =====", flush=True)
     subprocess.run([sys.executable, f"{CODE}/{step}.py"], check=True)
 

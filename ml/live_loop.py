@@ -36,6 +36,7 @@ import torch
 
 import features as F
 import jev_client
+import market_context
 import paper_engine as PE
 import regime as R
 import risk_engine as RE
@@ -120,10 +121,39 @@ def fetch_recent(bars: int = WARMUP_BARS) -> pd.DataFrame:
     return df.tail(bars).reset_index(drop=True)
 
 
+def fetch_funding(limit: int = 200) -> pd.DataFrame:
+    """Recent funding events. Empty frame if the futures API is unreachable."""
+    for host in ("https://fapi.binance.com", "https://fapi-gcp.binance.com"):
+        try:
+            url = f"{host}/fapi/v1/fundingRate?symbol={SYMBOL}&limit={limit}"
+            req = urllib.request.Request(url, headers={"User-Agent": "btc-paper-trader/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                rows = json.loads(r.read())
+            df = pd.DataFrame(rows)
+            df["funding_time"] = pd.to_datetime(df["fundingTime"], unit="ms", utc=True)
+            df["funding_rate"] = df["fundingRate"].astype(float)
+            return df[["funding_time", "funding_rate"]].sort_values("funding_time")
+        except Exception as e:
+            print(f"  funding {host}: {type(e).__name__} {e}", flush=True)
+    return pd.DataFrame(columns=["funding_time", "funding_rate"])
+
+
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Must produce exactly the columns the trained model expects.
+
+    A model trained with funding features cannot run without them, and a silent
+    column mismatch would either crash at inference or -- worse -- reorder the
+    inputs and predict from the wrong numbers. load_production_model selects by
+    name from feat_cols, so a missing column fails loudly instead.
+    """
     df = df.copy()
     df["is_gap"] = False
     feats = F.add_indicators(df)
+
+    funding = fetch_funding()
+    if not funding.empty:
+        feats = pd.concat([feats, F.add_funding_features(df, funding)], axis=1)
+
     out = pd.concat([df[["open_time", "open", "high", "low", "close"]], feats], axis=1)
     return out.replace([np.inf, -np.inf], np.nan).ffill().fillna(0)
 
@@ -329,7 +359,13 @@ def process_candle(db, mb, feats, idx, users, dry_run=False, verbose=True):
                     "take_profit": round(pos.take_profit, 2),
                     "fees": round(pos.fees, 4)})
 
-    # 5. Equity snapshot per user, for the dashboard's curve.
+    # 5. Positioning snapshot. Binance keeps ~30 days of open interest and no
+    #    5m history worth training on, so this is captured now to build one.
+    #    Never allowed to break the loop -- it is auxiliary data.
+    if not dry_run:
+        market_context.record(db, candle_time)
+
+    # 6. Equity snapshot per user, for the dashboard's curve.
     if not dry_run:
         snaps = []
         for user in users:

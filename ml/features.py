@@ -116,6 +116,54 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return f
 
 
+FUNDING_PER_DAY = 3        # paid every 8 hours
+
+
+def add_funding_features(df: pd.DataFrame, funding: pd.DataFrame) -> pd.DataFrame:
+    """Leveraged-positioning features from the perpetual funding rate.
+
+    Funding is the one positioning signal with real history -- Binance keeps
+    open interest and the long/short ratio for only ~30 days, so neither can be
+    trained on. It is information price does not carry: a persistently positive
+    rate means longs are paying to stay long, which is crowding.
+
+    merge_asof with direction="backward" is what keeps this honest. At candle t
+    it attaches the most recent funding event published at or BEFORE t. A plain
+    join on nearest would let a rate published at 16:00 leak into candles from
+    15:55, which is a four-hour lookahead dressed up as a merge.
+    """
+    f = pd.DataFrame(index=df.index)
+
+    merged = pd.merge_asof(
+        df[["open_time"]].sort_values("open_time"),
+        funding.sort_values("funding_time"),
+        left_on="open_time", right_on="funding_time", direction="backward",
+    )
+    rate = merged["funding_rate"].to_numpy()
+    f["funding_rate"] = rate
+
+    s = pd.Series(rate, index=df.index)
+    # Windows are in candles: 8h of funding = 96 candles.
+    per_event = 96
+    f["funding_cum_1d"] = s.rolling(per_event * FUNDING_PER_DAY, min_periods=1).mean()
+    f["funding_cum_7d"] = s.rolling(per_event * FUNDING_PER_DAY * 7, min_periods=1).mean()
+
+    long_win = per_event * FUNDING_PER_DAY * 30
+    mu = s.rolling(long_win, min_periods=per_event).mean()
+    sd = s.rolling(long_win, min_periods=per_event).std()
+    f["funding_z"] = (s - mu) / sd.replace(0, np.nan)
+    f["funding_pctile"] = s.rolling(long_win, min_periods=per_event).rank(pct=True)
+
+    # Funding settles at 00:00, 08:00 and 16:00 UTC. Position crowding unwinds
+    # around those times, so where we sit in the cycle carries information.
+    hours = df["open_time"].dt.hour + df["open_time"].dt.minute / 60
+    phase = (hours % 8) / 8
+    f["funding_phase_sin"] = np.sin(2 * np.pi * phase)
+    f["funding_phase_cos"] = np.cos(2 * np.pi * phase)
+
+    return f
+
+
 def add_labels(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
     """Label the trade we could actually take.
 
@@ -173,6 +221,16 @@ def main() -> None:
     print(f"horizon: {HORIZON} bars = {horizon_label()}")
 
     feats = add_indicators(df)
+
+    funding_path = DATA / "BTCUSDT_funding.parquet"
+    if funding_path.exists():
+        funding = pd.read_parquet(funding_path)
+        fund = add_funding_features(df, funding)
+        feats = pd.concat([feats, fund], axis=1)
+        print(f"funding: {len(funding):,} events, {fund.shape[1]} features")
+    else:
+        print("no funding data; run ml/fetch_funding.py to include it")
+
     sweep_thresholds(df)
 
     threshold = ROUND_TRIP_COST
@@ -233,6 +291,19 @@ def _self_check() -> None:
     f2 = add_indicators(scaled)
     drift = (f1 - f2).abs().max().max()
     assert drift < 1e-9, f"non-stationary feature, max drift {drift}"
+
+    # Funding must never be visible before it is published. A rate settled at
+    # 08:00 must not appear on any candle before 08:00 -- merge_asof with the
+    # wrong direction is an eight-hour leak that nothing else would catch.
+    ft = pd.to_datetime(["2024-01-01 00:00", "2024-01-01 08:00", "2024-01-01 16:00"], utc=True)
+    funding = pd.DataFrame({"funding_time": ft, "funding_rate": [0.0001, 0.0009, 0.0002]})
+    candles = pd.DataFrame({"open_time": pd.date_range("2024-01-01", periods=200,
+                                                       freq="5min", tz="UTC")})
+    ff = add_funding_features(candles, funding)
+    before = candles["open_time"] < ft[1]
+    assert (ff.loc[before, "funding_rate"] == 0.0001).all(), "funding leaked before publication"
+    at_or_after = (candles["open_time"] >= ft[1]) & (candles["open_time"] < ft[2])
+    assert (ff.loc[at_or_after, "funding_rate"] == 0.0009).all(), "funding not applied once published"
 
     print("self-check passed: no lookahead, labels use the future, features scale-free")
 
