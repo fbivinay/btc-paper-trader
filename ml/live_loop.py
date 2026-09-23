@@ -44,7 +44,16 @@ from db import DB, DBError, load_env
 from train import SEQ_LEN, LSTMClassifier, NOT_FEATURES
 
 ROOT = Path(__file__).resolve().parent.parent
-BINANCE = "https://api.binance.com/api/v3/klines"
+
+# data-api.binance.vision first: it is Binance's public market-data mirror and
+# is not geo-restricted. api.binance.com returns HTTP 451 (Unavailable For Legal
+# Reasons) from US IPs, which is where GitHub Actions runners live -- the loop
+# worked from a developer machine in India and failed on every CI run.
+BINANCE_HOSTS = [
+    "https://data-api.binance.vision",
+    "https://api-gcp.binance.com",
+    "https://api.binance.com",
+]
 SYMBOL = "BTCUSDT"
 INTERVAL = "5m"
 BAR = timedelta(minutes=5)
@@ -66,14 +75,30 @@ def fetch_recent(bars: int = WARMUP_BARS) -> pd.DataFrame:
     always dropped -- acting on a partial candle is the live-trading equivalent
     of a lookahead bug.
     """
-    rows, end_time = [], None
-    while len(rows) < bars:
-        url = f"{BINANCE}?symbol={SYMBOL}&interval={INTERVAL}&limit=1000"
+    def klines(host: str, end_time):
+        url = f"{host}/api/v3/klines?symbol={SYMBOL}&interval={INTERVAL}&limit=1000"
         if end_time:
             url += f"&endTime={end_time}"
         req = urllib.request.Request(url, headers={"User-Agent": "btc-paper-trader/1.0"})
         with urllib.request.urlopen(req, timeout=20) as r:
-            batch = json.loads(r.read())
+            return json.loads(r.read())
+
+    # Pick a host that answers from wherever this is running, then stay on it so
+    # the series cannot be stitched together from two sources.
+    host = None
+    for candidate in BINANCE_HOSTS:
+        try:
+            klines(candidate, None)
+            host = candidate
+            break
+        except Exception as e:
+            print(f"  {candidate}: {type(e).__name__} {e}", flush=True)
+    if host is None:
+        sys.exit("no reachable Binance endpoint")
+
+    rows, end_time = [], None
+    while len(rows) < bars:
+        batch = klines(host, end_time)
         if not batch:
             break
         rows = batch + rows
