@@ -22,9 +22,10 @@ class RiskProfile:
     risk_per_trade: float     # fraction of trading capital risked between entry and stop
     max_positions: int
     max_exposure: float       # fraction of trading capital allowed in open positions
-    min_confidence: float     # model confidence floor
+    confidence_pct: float     # trade only this top fraction of signals by confidence
     stop_atr_mult: float
     take_profit_r: float      # take profit as a multiple of the stop distance (R)
+    fallback_min_conf: float  # absolute floor used only if a model ships no gates
 
 
 # risk_per_trade is small because the horizon is short. A 30-minute trade stops
@@ -33,11 +34,38 @@ class RiskProfile:
 # ATR-derived stop, not the no-leverage ceiling, is what determines position size
 # at BTC's typical 5m ATR of 0.1-0.4%. Set them higher and every profile collapses
 # to "maximum allowed size, always", which is not risk management.
+#
+# confidence_pct is a PERCENTILE, not an absolute threshold, because the absolute
+# one is not stable. Across the 4h walk-forward the top-9% cutoff ranged from
+# 0.43 to 0.95 depending on the fold. A hardcoded 0.5 would have traded a third
+# of all candles in one quarter and none at all in the next. Each promoted model
+# ships its own confidence distribution and the percentile is resolved against
+# that; see resolve_min_confidence.
 PROFILES = {
-    "conservative": RiskProfile(0.0005, 1, 0.35, 0.45, 2.0, 1.5),
-    "balanced":     RiskProfile(0.0015, 2, 0.60, 0.40, 1.5, 1.5),
-    "aggressive":   RiskProfile(0.0030, 3, 1.00, 0.35, 1.2, 2.0),
+    "conservative": RiskProfile(0.0005, 1, 0.35, 0.05, 2.0, 1.5, 0.60),
+    "balanced":     RiskProfile(0.0015, 2, 0.60, 0.10, 1.5, 1.5, 0.50),
+    "aggressive":   RiskProfile(0.0030, 3, 1.00, 0.25, 1.2, 2.0, 0.40),
 }
+
+
+def resolve_min_confidence(profile_name: str, model_gates: dict | None) -> float:
+    """Turn a profile's percentile into this model's absolute confidence floor.
+
+    `model_gates` maps a percentile to the confidence value at that percentile,
+    measured on the model's own validation set at promotion time, e.g.
+    {0.05: 0.81, 0.10: 0.73, 0.25: 0.58}. Without it we fall back to a fixed
+    floor, which is safe but blunt.
+    """
+    p = PROFILES[profile_name]
+    if not model_gates:
+        return p.fallback_min_conf
+    # Normalise keys first: these arrive from JSON, where 0.10 comes back as the
+    # string "0.10" and str(0.10) is "0.1", so round-tripping the key is not safe.
+    gates = {float(k): float(v) for k, v in model_gates.items()}
+    # Nearest available percentile at or tighter than the one requested, so a
+    # missing key errs toward trading less rather than more.
+    eligible = [k for k in gates if k <= p.confidence_pct]
+    return gates[max(eligible)] if eligible else gates[min(gates)]
 
 
 @dataclass
@@ -75,7 +103,8 @@ class Verdict:
 
 def approve(proposal: Proposal, state: PortfolioState, profile_name: str,
             virtual_capital: float, trading_allocation: float,
-            daily_profit_target: float, max_daily_loss: float) -> Verdict:
+            daily_profit_target: float, max_daily_loss: float,
+            model_gates: dict | None = None) -> Verdict:
     """Return the sized, bounded trade, or the reason there isn't one.
 
     Checks run cheapest-and-hardest first so that the reported rule is the most
@@ -104,9 +133,11 @@ def approve(proposal: Proposal, state: PortfolioState, profile_name: str,
                        f"daily pnl {state.daily_pnl:.2f} >= target {target:.2f}")
 
     # --- signal quality ---
-    if proposal.confidence < p.min_confidence:
+    min_conf = resolve_min_confidence(profile_name, model_gates)
+    if proposal.confidence < min_conf:
         return Verdict(False, "low_confidence",
-                       f"confidence {proposal.confidence:.3f} < {p.min_confidence:.3f}")
+                       f"confidence {proposal.confidence:.3f} < {min_conf:.3f} "
+                       f"(top {p.confidence_pct:.0%} of signals)")
 
     # --- concurrency and exposure ---
     if state.open_positions >= p.max_positions:
@@ -180,10 +211,29 @@ def _self_check() -> None:
     done = PortfolioState(5000, 10200, 0, 0, daily_pnl=200, day_start_equity=10000)
     assert approve(good, done, "balanced", **kw).rule == "daily_target_reached"
 
-    # Confidence floor, and it differs by profile.
-    weak = Proposal("LONG", 0.38, 100000, 0.004)
+    # Confidence floor, and it differs by profile. Without model gates the
+    # fallback floors apply (0.60 / 0.50 / 0.40).
+    weak = Proposal("LONG", 0.45, 100000, 0.004)
     assert approve(weak, base_state, "conservative", **kw).rule == "low_confidence"
     assert approve(weak, base_state, "aggressive", **kw).approved
+
+    # With a model's own gates, the same percentile resolves to that model's
+    # scale. A model whose top-10% cutoff is 0.73 must reject 0.70 for balanced
+    # while a model whose cutoff is 0.45 accepts it -- this is the whole reason
+    # the threshold travels with the model.
+    tight = {0.05: 0.81, 0.10: 0.73, 0.25: 0.58}
+    loose = {0.05: 0.52, 0.10: 0.45, 0.25: 0.38}
+    mid = Proposal("LONG", 0.70, 100000, 0.004)
+    assert approve(mid, base_state, "balanced", model_gates=tight, **kw).rule == "low_confidence"
+    assert approve(mid, base_state, "balanced", model_gates=loose, **kw).approved
+
+    # Conservative is stricter than aggressive on the same model.
+    assert (resolve_min_confidence("conservative", tight)
+            > resolve_min_confidence("aggressive", tight))
+    # A percentile with no exact match must round toward trading less.
+    assert resolve_min_confidence("balanced", {0.05: 0.81, 0.25: 0.58}) == 0.81
+    # String keys survive a JSON round trip.
+    assert resolve_min_confidence("balanced", {"0.10": 0.73}) == 0.73
 
     # Position count and exposure ceilings.
     assert approve(good, PortfolioState(5000, 10000, 2, 1000, 0, 10000),
