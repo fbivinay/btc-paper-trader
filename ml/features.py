@@ -21,12 +21,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from config import HORIZON, BARS_PER_DAY, COST as ROUND_TRIP_COST, horizon_label
+from config import (HORIZON, BARS_PER_DAY, COST as ROUND_TRIP_COST,
+                    THRESHOLD, THRESHOLD_MULT, horizon_label)
 
 DATA = Path(os.environ.get("BTC_DATA_DIR",
                            Path(__file__).resolve().parent.parent / "data"))
 SRC = DATA / "BTCUSDT_5m.parquet"
-OUT = DATA / f"BTCUSDT_5m_features_h{HORIZON}.parquet"
+OUT = DATA / f"BTCUSDT_5m_features_h{HORIZON}_t{THRESHOLD_MULT:g}.parquet"
 
 
 def wilder(s: pd.Series, n: int) -> pd.Series:
@@ -164,6 +165,35 @@ def add_funding_features(df: pd.DataFrame, funding: pd.DataFrame) -> pd.DataFram
     return f
 
 
+def add_sentiment_features(df: pd.DataFrame, fng: pd.DataFrame) -> pd.DataFrame:
+    """Crowd-sentiment features from the Fear & Greed index.
+
+    Published once a day, so merge_asof backward again: at candle t only the
+    value already published is visible. A forward or nearest merge would let
+    tomorrow's sentiment inform today's trade, which is a full day of lookahead.
+
+    The index is contrarian by construction -- extremes mark turning points more
+    often than continuations -- so the distance from neutral and the rate of
+    change matter more than the level.
+    """
+    f = pd.DataFrame(index=df.index)
+
+    merged = pd.merge_asof(
+        df[["open_time"]].sort_values("open_time"),
+        fng.sort_values("fng_time"),
+        left_on="open_time", right_on="fng_time", direction="backward",
+    )
+    v = pd.Series(merged["fng"].to_numpy(), index=df.index)
+
+    f["fng"] = v / 50 - 1                       # -1 extreme fear .. +1 extreme greed
+    f["fng_extreme"] = (v / 50 - 1).abs()       # distance from neutral
+    f["fng_chg_7d"] = (v - v.shift(BARS_PER_DAY * 7)) / 100
+    f["fng_z_30d"] = ((v - v.rolling(BARS_PER_DAY * 30, min_periods=BARS_PER_DAY).mean())
+                      / v.rolling(BARS_PER_DAY * 30, min_periods=BARS_PER_DAY).std()
+                      .replace(0, np.nan))
+    return f
+
+
 def add_labels(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
     """Label the trade we could actually take.
 
@@ -231,9 +261,18 @@ def main() -> None:
     else:
         print("no funding data; run ml/fetch_funding.py to include it")
 
+    fng_path = DATA / "fear_greed.parquet"
+    if fng_path.exists():
+        fng = pd.read_parquet(fng_path)
+        sent = add_sentiment_features(df, fng)
+        feats = pd.concat([feats, sent], axis=1)
+        print(f"sentiment: {len(fng):,} daily values, {sent.shape[1]} features")
+    else:
+        print("no sentiment data; run ml/fetch_sentiment.py to include it")
+
     sweep_thresholds(df)
 
-    threshold = ROUND_TRIP_COST
+    threshold = THRESHOLD
     out = pd.concat([df[["open_time", "open", "high", "low", "close", "volume", "is_gap"]],
                      feats, add_labels(df, threshold)], axis=1)
 
@@ -304,6 +343,15 @@ def _self_check() -> None:
     assert (ff.loc[before, "funding_rate"] == 0.0001).all(), "funding leaked before publication"
     at_or_after = (candles["open_time"] >= ft[1]) & (candles["open_time"] < ft[2])
     assert (ff.loc[at_or_after, "funding_rate"] == 0.0009).all(), "funding not applied once published"
+
+    # Sentiment published daily must not be visible before publication either.
+    ft2 = pd.to_datetime(["2024-01-01", "2024-01-02"], utc=True)
+    fng = pd.DataFrame({"fng_time": ft2, "fng": [20.0, 80.0]})
+    c2 = pd.DataFrame({"open_time": pd.date_range("2024-01-01", periods=400,
+                                                  freq="5min", tz="UTC")})
+    sf = add_sentiment_features(c2, fng)
+    pre = c2["open_time"] < ft2[1]
+    assert (sf.loc[pre, "fng"] == (20 / 50 - 1)).all(), "sentiment leaked before publication"
 
     print("self-check passed: no lookahead, labels use the future, features scale-free")
 

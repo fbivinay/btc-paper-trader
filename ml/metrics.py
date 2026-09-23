@@ -113,9 +113,13 @@ def _self_check() -> None:
     dense = np.full(n, UP)
     assert len(simulate(dense, conf, np.full(n, 0.01))) == n // (HORIZON + 1) + 1
 
-    # A winning move smaller than the round trip must still lose money.
-    small = simulate(np.array([UP]), np.array([1.0]), np.array([0.002]))
+    # A winning move smaller than the round trip must still lose money. Derived
+    # from COST, not hardcoded: a fixed 0.2% was "below cost" on spot fees and
+    # silently became "above cost" the moment the execution model changed.
+    small = simulate(np.array([UP]), np.array([1.0]), np.array([COST * 0.5]))
     assert small["pnl"].iloc[0] < 0, "sub-cost win must be a net loss"
+    big = simulate(np.array([UP]), np.array([1.0]), np.array([COST * 2]))
+    assert big["pnl"].iloc[0] > 0, "move of twice the cost must be a net win"
 
     # Shorts profit from down moves.
     assert simulate(np.array([DOWN]), np.array([1.0]), np.array([-0.01]))["pnl"].iloc[0] > 0
