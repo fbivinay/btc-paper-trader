@@ -1,0 +1,18 @@
+# Data is rebuilt from data.binance.vision by ml/fetch_history.py -- 160MB of it,
+# and it would be stale the moment it was committed.
+data/
+artifacts/
+kaggle/code/*.py
+
+# Secrets. Nothing here should ever exist, but make it impossible by accident.
+.env
+.env.*
+*.key
+access_token
+kaggle.json
+
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+.next/
