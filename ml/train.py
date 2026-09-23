@@ -255,7 +255,12 @@ def main() -> None:
             per_fold.append({"test_from": str(lo), "test_to": str(hi),
                              "pred_mix": out["pred_mix"], "gates": out["gates"],
                              **out["metrics"]})
-            torch.save({"state": out["state"], "mu": out["mu"], "sd": out["sd"],
+            # mu/sd as tensors, not numpy: a checkpoint containing only tensors
+            # and plain types loads with weights_only=True, so deserialising a
+            # model cannot execute arbitrary code.
+            torch.save({"state": out["state"],
+                        "mu": torch.from_numpy(out["mu"]),
+                        "sd": torch.from_numpy(out["sd"]),
                         "feat_cols": feat_cols, "seq_len": SEQ_LEN,
                         "window_days": w, "test_to": str(hi),
                         "hidden": args.hidden, "layers": args.layers},
