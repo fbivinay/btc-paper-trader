@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 
 ENDPOINT = "https://www.jevai.org/api/v1/decisions"
-MODEL = "jev-1"
+MODEL = "typesafe-ai/jev"   # the API rejects "jev-1"; identifier must be namespaced
 TIMEOUT = 8.0
 
 STRATEGIES = {
@@ -141,9 +141,15 @@ def decide(prediction: str, confidence: float, regime, price: float,
                     result["error"] = f"unknown strategy {strategy!r}"
             else:
                 result["error"] = payload.get("message", "non-zero code")
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError,
-                json.JSONDecodeError, OSError) as e:
-            # 429 lands here and is expected, not exceptional.
+        except urllib.error.HTTPError as e:
+            # The response body carries the actual reason (bad field, rate limit);
+            # the status line alone does not. 429 lands here and is expected.
+            try:
+                detail = json.loads(e.read()).get("message", "")
+            except Exception:
+                detail = ""
+            result["error"] = f"HTTP {e.code}: {detail or e.reason}"
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as e:
             result["error"] = f"{type(e).__name__}: {e}"
     else:
         result["error"] = "no JEV_API_KEY set"
