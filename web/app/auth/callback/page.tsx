@@ -22,8 +22,22 @@ export default function AuthCallback() {
       const db = supabase();
       const params = new URLSearchParams(window.location.search);
 
-      const described = params.get("error_description");
-      if (described) { setError(described); return; }
+      // Never render error_description from the URL. React escapes it, so it is
+      // not XSS, but it is attacker-controlled text on a page the user trusts:
+      // /auth/callback?error_description=Account+locked,+call+1-800-... would
+      // display as though the app said it. Map the machine-readable code to our
+      // own copy instead, and keep anything unrecognised generic.
+      const errorCode = params.get("error_code") ?? params.get("error");
+      if (errorCode) {
+        setError(
+          {
+            access_denied: "That confirmation link was declined. Request a new one.",
+            otp_expired: "That confirmation link has expired. Sign up again to get a new one.",
+            server_error: "Sign-in is temporarily unavailable. Try again shortly.",
+          }[errorCode] ?? "That confirmation link is not valid. Try signing in, or sign up again."
+        );
+        return;
+      }
 
       const code = params.get("code");
       if (code) {
