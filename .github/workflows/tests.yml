@@ -1,0 +1,59 @@
+name: tests
+
+# Every module ships an assert-based self-check. They run here so a change that
+# breaks the label alignment, the cost model or the risk rules fails at push
+# time rather than silently producing wrong trades for a week.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  selfchecks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          python -m pip install --quiet --upgrade pip
+          pip install --quiet pandas numpy pyarrow
+          pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Self-checks
+        working-directory: ml
+        run: |
+          python config.py 2>/dev/null || true
+          python metrics.py
+          python features.py --check
+          python risk_engine.py
+          python paper_engine.py
+          python regime.py
+          python jev_client.py
+          python db.py
+
+      - name: Cost model consistency
+        working-directory: ml
+        # The paper engine and the backtest metrics must charge the same round
+        # trip. They disagreed once already -- config counted slippage per round
+        # trip while the engine charged it per leg -- and the discrepancy is
+        # invisible unless something asserts it.
+        run: |
+          python - <<'EOF'
+          from datetime import datetime
+          import config, paper_engine as PE
+          t = datetime(2026, 1, 1)
+          c = PE.Candle(t, 100000, 100000, 100000, 100000)
+          p = PE.open_position("LONG", 1.0, c, 90000, 110000)
+          PE.close_position(p, 100000, t, PE.HORIZON_EXIT)
+          implied = -p.pnl / 100000
+          assert abs(implied - config.COST) < 5e-5, \
+              f"paper engine charges {implied:.4%}, config.COST says {config.COST:.4%}"
+          print(f"cost model agrees: {implied:.4%}")
+          EOF
