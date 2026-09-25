@@ -113,6 +113,48 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     f["upper_wick"] = (h - np.maximum(c, df["open"])) / rng
     f["lower_wick"] = (np.minimum(c, df["open"]) - l) / rng
 
+    # --- order flow: who is crossing the spread ---
+    #
+    # taker_buy_base is the share of volume that lifted the offer rather than
+    # hitting the bid. Price and total volume cannot express this: two candles
+    # with identical OHLCV can be one-sided buying or one-sided selling. It is
+    # the only feature here that describes WHO traded rather than WHAT printed,
+    # and short-horizon path asymmetry is exactly what it should speak to.
+    if "taker_buy_base" in df.columns:
+        tb = df["taker_buy_base"]
+        imb = (2 * tb / v.replace(0, np.nan) - 1)          # -1 all sells .. +1 all buys
+        f["flow_imb"] = imb
+        for w in (12, 72, 288):
+            f[f"flow_imb_{w}"] = imb.rolling(w).mean()
+        f["flow_imb_z"] = ((imb - imb.rolling(BARS_PER_DAY).mean())
+                           / imb.rolling(BARS_PER_DAY).std().replace(0, np.nan))
+        # Signed flow weighted by size: many small buys differ from one large one.
+        f["flow_signed_vol"] = (imb * v) / v.rolling(BARS_PER_DAY).mean().replace(0, np.nan)
+        # Divergence: price up on selling pressure is a different state from
+        # price up on buying pressure.
+        f["flow_div"] = np.sign(c.pct_change(12).fillna(0)) * -imb.rolling(12).mean()
+
+    if "quote_volume" in df.columns:
+        # Average trade size, relative to its own recent norm.
+        avg_sz = df["quote_volume"] / df["trades"].replace(0, np.nan)
+        f["trade_size_z"] = ((avg_sz - avg_sz.rolling(BARS_PER_DAY).mean())
+                             / avg_sz.rolling(BARS_PER_DAY).std().replace(0, np.nan))
+
+    # --- path asymmetry: upside and downside volatility are not the same ---
+    #
+    # A stop-and-target trade is decided by which extreme arrives first, so the
+    # asymmetry between up-moves and down-moves matters more than their average.
+    r1 = c.pct_change()
+    up_var = r1.clip(lower=0).rolling(72).std()
+    dn_var = (-r1.clip(upper=0)).rolling(72).std()
+    f["semivar_ratio"] = up_var / dn_var.replace(0, np.nan)
+    f["ret_skew_72"] = r1.rolling(72).skew()
+    f["ret_kurt_72"] = r1.rolling(72).kurt()
+    # How far the recent high and low sit from price, in ATR units: the barriers
+    # a trade must cross are relative to these, not to a fixed percentage.
+    f["dist_high_72"] = (h.rolling(72).max() / c - 1) / atr.div(c).replace(0, np.nan)
+    f["dist_low_72"] = (1 - l.rolling(72).min() / c) / atr.div(c).replace(0, np.nan)
+
     # --- time of day: crypto volume has a real diurnal cycle ---
     mins = df["open_time"].dt.hour * 60 + df["open_time"].dt.minute
     f["tod_sin"] = np.sin(2 * np.pi * mins / 1440)

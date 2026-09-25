@@ -65,11 +65,18 @@ def fetch_month(key: str) -> pd.DataFrame | None:
             skiprows=1 if has_header else 0,
         )
 
-    df = df[["open_time", "open", "high", "low", "close", "volume", "trades"]]
+    # taker_buy_base is the share of volume that was aggressive buying -- order
+    # flow imbalance, a different information class from price and total volume.
+    # quote_volume gives average trade size, which separates many small trades
+    # from few large ones.
+    df = df[["open_time", "open", "high", "low", "close", "volume", "trades",
+             "taker_buy_base", "quote_volume"]]
     # open_time is ms before ~2025-01 and microseconds after. Normalise by magnitude.
     unit = "us" if df["open_time"].iloc[0] > 1e14 else "ms"
     df["open_time"] = pd.to_datetime(df["open_time"], unit=unit, utc=True)
-    df = df.astype({c: "float64" for c in ["open", "high", "low", "close", "volume"]})
+    df = df.astype({c: "float64" for c in
+                    ["open", "high", "low", "close", "volume",
+                     "taker_buy_base", "quote_volume"]})
     df.to_parquet(cache, index=False)
     print(f"  {key}: {len(df):>6} candles", flush=True)
     return df
