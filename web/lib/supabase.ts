@@ -54,11 +54,15 @@ export type Run = {
   detail: string | null;
 };
 
-/** Every row of a table, past PostgREST's 1,000-row page limit. */
-export async function all<T>(table: string, order: string): Promise<T[]> {
+export type SlabRow = { date: string; slab: number; model_net: number; hold_net: number };
+
+export type Alert = { date: string; w_btc: number; w_gold: number; w_cash: number; delivered: boolean };
+
+/** Every row of a table (optionally filtered), past PostgREST's 1,000-row page limit. */
+export async function all<T>(table: string, order: string, match: Record<string, unknown> = {}): Promise<T[]> {
   const out: T[] = [];
   for (let from = 0; ; from += 1000) {
-    const { data, error } = await db.from(table).select("*")
+    const { data, error } = await db.from(table).select("*").match(match)
       .order(order, { ascending: true }).range(from, from + 999);
     if (error) throw error;
     out.push(...(data as T[]));

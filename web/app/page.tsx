@@ -3,11 +3,14 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import EquityChart from "@/components/EquityChart";
-import { all, db, type Decision, type EquityRow, type Run, type Trade } from "@/lib/supabase";
+import { all, db, type Alert, type Decision, type EquityRow, type Run, type SlabRow, type Trade } from "@/lib/supabase";
 import { CAPITAL, money, pct, stats, type Stats } from "@/lib/stats";
 
 type View = "net" | "gross";
 const VIEW_LABEL: Record<View, string> = { net: "After tax & charges", gross: "Before tax & charges" };
+// Indian slab rates; the stored values include the 4% cess. 31.2% is the default in etf_equity.
+const SLABS: [number, string][] = [[0.312, "30%"], [0.26, "25%"], [0.208, "20%"], [0.156, "15%"],
+                                   [0.104, "10%"], [0.052, "5%"]];
 
 export default function Dashboard() {
   const [eq, setEq] = useState<EquityRow[]>([]);
@@ -16,23 +19,28 @@ export default function Dashboard() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [firstLive, setFirstLive] = useState<string | null>(null);
   const [view, setView] = useState<View>("net");
+  const [slab, setSlab] = useState(0.312);
+  const [slabRows, setSlabRows] = useState<SlabRow[] | null>(null);
+  const [lastAlert, setLastAlert] = useState<Alert | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     async function load() {
       try {
-        const [e, d, t, r, l] = await Promise.all([
+        const [e, d, t, r, l, a] = await Promise.all([
           all<EquityRow>("etf_equity", "date"),
           db.from("etf_decisions").select("*").order("date", { ascending: false }).limit(2),
           db.from("etf_trades").select("*").order("date", { ascending: false }).limit(500),
           db.from("etf_runs").select("*").order("started_at", { ascending: false }).limit(5),
           db.from("etf_decisions").select("date").eq("live", true).order("date").limit(1),
+          db.from("etf_alerts").select("*").order("date", { ascending: false }).limit(1),
         ]);
         setEq(e);
         setDec((d.data ?? []) as Decision[]);
         setTrades((t.data ?? []) as Trade[]);
         setRuns((r.data ?? []) as Run[]);
         setFirstLive(l.data?.[0]?.date ?? null);
+        setLastAlert((a.data?.[0] ?? null) as Alert | null);
         setError(null);
       } catch (x) {
         setError(x instanceof Error ? x.message : String(x));
@@ -43,12 +51,28 @@ export default function Dashboard() {
     return () => clearInterval(t);
   }, []);
 
+  // Other tax slabs load on demand; the default top slab is already in etf_equity.
+  useEffect(() => {
+    if (slab === 0.312) return;
+    let alive = true;
+    all<SlabRow>("etf_equity_slab", "date", { slab })
+      .then((rows) => { if (alive) setSlabRows(rows); })
+      .catch((x) => setError(x instanceof Error ? x.message : String(x)));
+    return () => { alive = false; };
+  }, [slab]);
+
   const series = useMemo(() => {
     const dates = eq.map((r) => r.date);
     const col = (k: keyof EquityRow) => eq.map((r) => Number(r[k]));
-    return { dates, model_net: col("model_net"), model_gross: col("model_gross"),
-             hold_net: col("hold_net"), hold_gross: col("hold_gross") };
-  }, [eq]);
+    // Rows for the chosen slab, once they have arrived; the top slab lives in etf_equity itself.
+    const rows = slab !== 0.312 && slabRows?.length && Math.abs(Number(slabRows[0].slab) - slab) < 1e-4
+      ? slabRows : null;
+    const bySlab = new Map((rows ?? []).map((r) => [r.date, r]));
+    const net = (k: "model_net" | "hold_net") =>
+      rows ? eq.map((r) => Number(bySlab.get(r.date)?.[k] ?? r[k])) : col(k);
+    return { dates, model_net: net("model_net"), model_gross: col("model_gross"),
+             hold_net: net("hold_net"), hold_gross: col("hold_gross") };
+  }, [eq, slabRows, slab]);
 
   const lines = useMemo(() => [
     { label: "Model", color: "#34d399", dates: series.dates,
@@ -74,7 +98,7 @@ export default function Dashboard() {
 
   return (
     <Shell runs={latest} lastClose={d.date}>
-      <Today d={d} prev={dec[1]} />
+      <Today d={d} prev={dec[1]} alert={lastAlert} />
 
       <Section title="Results" note={`$${CAPITAL.toLocaleString()} each, from IBIT's launch on ${fmtDate(series.dates[0])} to ${fmtDate(d.date)}`}>
         <div className="mb-3 flex gap-1">
@@ -85,6 +109,17 @@ export default function Dashboard() {
             </button>
           ))}
         </div>
+        {view === "net" && (
+          <div className="mb-3 flex flex-wrap items-center gap-1 text-xs">
+            <span className="mr-1 text-zinc-500">Your income-tax slab</span>
+            {SLABS.map(([v, label]) => (
+              <button key={v} onClick={() => setSlab(v)}
+                className={`rounded px-2 py-1 ${slab === v ? "bg-zinc-700 text-zinc-100" : "text-zinc-400 hover:text-zinc-200"}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="grid gap-3 sm:grid-cols-2">
           <StatCard title="Model" color="text-emerald-400" st={view === "net" ? s.model_net : s.model_gross}
                     end={(view === "net" ? series.model_net : series.model_gross).at(-1)!} />
@@ -96,17 +131,17 @@ export default function Dashboard() {
         </div>
         <p className="mt-2 text-xs text-zinc-500">
           {view === "net"
-            ? "After tax & charges: what you would get back in hand if you sold everything that day — Indian capital-gains tax at the top 31.2% slab (13% after 24 months), 1.5% forex each way, 0.05% per trade, T-bill income taxed at slab."
+            ? `After tax & charges: what you would get back in hand if you sold everything that day — gains held under 24 months taxed at your slab (${(slab * 100).toFixed(1)}% with cess), 13% after 24 months, 1.5% forex each way, 0.05% per trade, T-bill income taxed at slab. The slab is your marginal rate; ask a CA which applies to you.`
             : "Before tax & charges: the same trades with no tax, no forex markup and no trading costs. The gap between the two views is what India and the middlemen take."}
         </p>
       </Section>
 
       <Section title="All four side by side" note="Calendar-year returns; 2024 starts at IBIT's launch, the latest year is year-to-date">
-        <Comparison s={s} />
+        <Comparison s={s} slab={SLABS.find(([v]) => v === slab)![1]} />
         <p className="mt-2 text-xs text-zinc-500">
           After-tax values are what you would get if you sold that day, so a year can look better after tax
           than before: once IBIT has been held 24 months (from January 2026 for buy &amp; hold) the tax on selling
-          falls from 31.2% to 13%, and the saving shows up in that year.
+          falls from your slab rate to 13%, and the saving shows up in that year.
         </p>
       </Section>
 
@@ -185,7 +220,7 @@ function Section({ title, note, children }: { title: string; note?: string; chil
   );
 }
 
-function Today({ d, prev }: { d: Decision; prev?: Decision }) {
+function Today({ d, prev, alert }: { d: Decision; prev?: Decision; alert: Alert | null }) {
   const parts = [
     { k: "IBIT (Bitcoin)", w: d.w_btc, was: prev?.w_btc, c: "bg-amber-500" },
     { k: "GLD (gold)", w: d.w_gold, was: prev?.w_gold, c: "bg-yellow-300" },
@@ -220,6 +255,16 @@ function Today({ d, prev }: { d: Decision; prev?: Decision }) {
         <span>Gold volatility sizing <b className="text-zinc-200">×{Number(d.gold_vol).toFixed(2)}</b></span>
         {d.tbill !== null && <span>T-bill yield <b className="text-zinc-200">{(d.tbill * 100).toFixed(2)}%</b></span>}
       </div>
+      <p className="mt-3 text-xs text-zinc-500">
+        {alert
+          ? <>Last rebalance alert: {fmtDate(alert.date)} — IBIT {(alert.w_btc * 100).toFixed(0)}%, gold{" "}
+              {(alert.w_gold * 100).toFixed(0)}%, T-bills {(alert.w_cash * 100).toFixed(0)}%.{" "}</>
+          : <>No rebalance alert sent yet; the first comes with the first live decision.{" "}</>}
+        Trading by hand in any broker app?{" "}
+        <Link href="/go-live#alerts" className="underline decoration-zinc-700 hover:text-zinc-300">
+          Get these on your phone
+        </Link>.
+      </p>
     </Section>
   );
 }
@@ -247,11 +292,11 @@ function Kv({ k, v }: { k: string; v: string }) {
   );
 }
 
-function Comparison({ s }: { s: Record<"model_net" | "model_gross" | "hold_net" | "hold_gross", Stats> }) {
+function Comparison({ s, slab }: { s: Record<"model_net" | "model_gross" | "hold_net" | "hold_gross", Stats>; slab: string }) {
   const rows: [string, Stats][] = [
-    ["Model — after tax & charges", s.model_net],
+    [`Model — after tax & charges (${slab} slab)`, s.model_net],
     ["Model — before tax & charges", s.model_gross],
-    ["Buy & hold — after tax & charges", s.hold_net],
+    [`Buy & hold — after tax & charges (${slab} slab)`, s.hold_net],
     ["Buy & hold — before tax & charges", s.hold_gross],
   ];
   const years = s.model_net.years.map(([y]) => y);

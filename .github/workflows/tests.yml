@@ -30,3 +30,4 @@ jobs:
           python etf_model.py
           python broker.py
           python db.py
+          python etf_daily.py check

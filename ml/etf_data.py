@@ -14,6 +14,8 @@ switch-over. That history never changes, so it lives in btc_before_ibit.csv.
 """
 
 import json
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -29,8 +31,15 @@ def yahoo(ticker: str) -> pd.DataFrame:
     url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
            f"?period1={START}&period2={int(pd.Timestamp.now().timestamp())}&interval=1d")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        j = json.loads(r.read())["chart"]["result"][0]
+    for attempt in range(3):                 # a free API hiccups; three tries, then fail loudly
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                j = json.loads(r.read())["chart"]["result"][0]
+            break
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == 2:
+                raise
+            time.sleep(10 * (attempt + 1))
     q = j["indicators"]["quote"][0]
     date = (pd.to_datetime(j["timestamp"], unit="s", utc=True)
             .tz_convert("America/New_York").normalize().tz_localize(None))

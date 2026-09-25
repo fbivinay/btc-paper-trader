@@ -48,6 +48,8 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          # Phone alerts for hand-traders: subscribe to this ntfy.sh topic in the ntfy app.
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           # Broker: absent keys mean paper ledger only. Orders need SEND_ORDERS=on
           # (repository variable = the kill switch); real money also needs ALPACA_LIVE=yes.
           ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}

@@ -46,7 +46,20 @@ export default function GoLive() {
           </ul>
         </Block>
 
-        <Block title="2. Switching it on">
+        <Block title="2. Two ways to run it" id="alerts">
+          <ul className="list-disc space-y-1.5 pl-5">
+            <li><b>Semi-automatic — works with any broker app, no API needed.</b> The job sends a phone alert
+              only when your split should change (about once a week), and you place the 2–4 orders yourself in
+              INDmoney, Vested, Interactive Brokers or any other app. Set up: install the free <b>ntfy</b> app,
+              subscribe to your private topic (the random name stored in the GitHub secret{" "}
+              <Code>NTFY_TOPIC</Code>), and adjust your holdings to the split in each alert, at the next US open.
+              Keep the topic name private: anyone who knows it can read and post to it.</li>
+            <li><b>Fully automatic — needs a broker with an API</b> (steps below). Orders are placed for you
+              every trading day, with the safety rules in section 4.</li>
+          </ul>
+        </Block>
+
+        <Block title="3. Switching on full automation">
           <ol className="list-decimal space-y-1.5 pl-5">
             <li><b>Paper broker first.</b> Open a free Alpaca paper account and create API keys. In the GitHub
               repository add them as secrets <Code>ALPACA_KEY_ID</Code> and <Code>ALPACA_SECRET_KEY</Code>, then
@@ -65,7 +78,7 @@ export default function GoLive() {
           </ol>
         </Block>
 
-        <Block title="3. What runs every day">
+        <Block title="4. What runs every day">
           <ul className="list-disc space-y-1.5 pl-5">
             <li><b>Decide — 22:30 UTC (4:00 am IST), Monday to Friday.</b> Fetch the day&rsquo;s real closes, refuse
               stale, missing or absurd data, record the decision once (it can never be edited afterwards), and
@@ -73,6 +86,8 @@ export default function GoLive() {
             <li><b>Execute — 14:45 UTC (8:15 pm IST), Monday to Friday</b>, when the US market is open in both
               summer and winter time. Only if keys are set and the switch is on: sell first, wait for the fills,
               then buy with cash only.</li>
+            <li><b>Alert</b> — right after the decision, if the split moved enough to be worth a trade, a phone
+              alert goes to your ntfy topic.</li>
             <li><b>No duplicate orders:</b> every order carries an ID built from the decision date, and the broker
               rejects a second copy. Blocked or inactive account: nothing is sent.</li>
             <li><b>Monitoring:</b> the dashboard shows the last run; GitHub emails you when a run fails.</li>
@@ -80,7 +95,7 @@ export default function GoLive() {
           </ul>
         </Block>
 
-        <Block title="4. Costs with real money">
+        <Block title="5. Costs with real money">
           <ul className="list-disc space-y-1.5 pl-5">
             <li>Forex markup when sending and bringing back money: 0.5–2% each way depending on the bank, plus
               ₹500–1,500 + GST per remittance. The results assume 1.5% each way.</li>
@@ -91,7 +106,7 @@ export default function GoLive() {
           </ul>
         </Block>
 
-        <Block title="5. Tax in India — confirm with a Chartered Accountant">
+        <Block title="6. Tax in India — confirm with a Chartered Accountant">
           <ul className="list-disc space-y-1.5 pl-5">
             <li>Gains on US-listed ETFs are capital gains on foreign securities — not the 30% crypto (VDA) tax.</li>
             <li>Held under 24 months: taxed at your slab rate. The results assume the top slab, 31.2%. Held 24
@@ -106,7 +121,7 @@ export default function GoLive() {
           </ul>
         </Block>
 
-        <Block title="6. Risks">
+        <Block title="7. Risks">
           <ul className="list-disc space-y-1.5 pl-5">
             <li>The model can lose money. On IBIT&rsquo;s real prices since 2024 its worst fall was about 15% after
               tax, against 43% for holding IBIT; Bitcoin itself has fallen 75% in the past.</li>
@@ -120,9 +135,9 @@ export default function GoLive() {
   );
 }
 
-function Block({ title, children }: { title: string; children: React.ReactNode }) {
+function Block({ title, id, children }: { title: string; id?: string; children: React.ReactNode }) {
   return (
-    <section className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
+    <section id={id} className="scroll-mt-4 rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
       <h2 className="mb-2 text-sm font-medium text-zinc-100">{title}</h2>
       {children}
     </section>

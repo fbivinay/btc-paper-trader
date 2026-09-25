@@ -29,6 +29,11 @@ what you would get back if you sold that day.
 On real prices the model returned more than holding, with about a third of the
 worst drop, and no losing year. It does not reach 25% in every year.
 
+The top slab is the conservative case. Tax is the biggest single cost, so the
+dashboard lets you pick your own slab. At the 20% slab the model made +30.6% a
+year on real prices; at 10%, +34.9%. Buy & hold barely moves, because gains on
+an ETF held over 24 months are taxed at a flat 12.5% plus cess, whatever the slab.
+
 ## How it decides
 
 Once a day, after the US close, from finished daily bars; traded at the next open.
@@ -87,6 +92,10 @@ GitHub Actions (free)                 Supabase (free Postgres)        Vercel (fr
   - a sell never exceeds the shares held (no shorting)
   - each order is capped at `MAX_ORDER_USD`
   - every order carries an ID built from the decision date, so the broker rejects duplicates
+- **Alert** goes out when the split moves enough to be worth a trade, about once
+  a week. It is a free phone push via ntfy.sh, so the model works with **any**
+  broker app, even ones with no API (INDmoney, Vested and others): you place the
+  2–4 orders by hand.
 - Every run writes to `etf_runs`, which the dashboard shows as its heartbeat. A
   failed run also makes GitHub email the owner.
 
@@ -102,7 +111,7 @@ GitHub Actions (free)                 Supabase (free Postgres)        Vercel (fr
 | `ml/broker.py` | Alpaca client and the cash-only rebalance |
 | `ml/etf_research.py` | all 15 strategies, chosen on 2019–23, tested on real 2024+ prices |
 | `ml/db.py` | minimal Supabase REST client |
-| `supabase/schema.sql` | tables and row-level security |
+| `supabase/schema.sql` | tables (decisions, equity by tax slab, trades, alerts, runs, orders) and row-level security |
 | `web/` | Next.js dashboard and the go-live guide |
 
 Every module has an assert-based self-check (`python ml/<module>.py`). CI runs
