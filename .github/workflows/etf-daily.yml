@@ -1,0 +1,65 @@
+name: etf daily
+
+# decide  22:30 UTC Mon-Fri -- after the US close (20:00 UTC in summer, 21:00 in winter)
+# execute 14:45 UTC Mon-Fri -- after the US open (13:30 UTC in summer, 14:30 in winter)
+# GitHub's scheduler can run late; both windows leave hours of slack. Holidays are
+# handled by the job itself: no new session means nothing new to decide or trade.
+on:
+  schedule:
+    - cron: "30 22 * * 1-5"
+    - cron: "45 14 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      job:
+        type: choice
+        options: [decide, execute]
+        default: decide
+      dry_run:
+        description: "Compute but write nothing and send nothing"
+        type: boolean
+        default: false
+
+concurrency:
+  # Two overlapping runs could both see "not yet executed" and both send orders.
+  group: etf-daily
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write        # only to stop GitHub disabling this schedule after 60 quiet days
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: pip install --quiet -r requirements.txt
+
+      - name: Run
+        working-directory: ml
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          # Broker: absent keys mean paper ledger only. Orders need SEND_ORDERS=on
+          # (repository variable = the kill switch); real money also needs ALPACA_LIVE=yes.
+          ALPACA_KEY_ID: ${{ secrets.ALPACA_KEY_ID }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_LIVE: ${{ vars.ALPACA_LIVE }}
+          SEND_ORDERS: ${{ vars.SEND_ORDERS }}
+          MAX_ORDER_USD: ${{ vars.MAX_ORDER_USD }}
+          JOB: ${{ inputs.job || (github.event.schedule == '45 14 * * 1-5' && 'execute' || 'decide') }}
+        run: python etf_daily.py "$JOB" ${{ inputs.dry_run && '--dry-run' || '' }}
+
+      - name: Keep the schedule alive
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/etf-daily.yml/enable"

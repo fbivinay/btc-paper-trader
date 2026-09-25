@@ -4,9 +4,9 @@ No supabase-py dependency: with the service-role key this is two headers on an
 HTTP request, and keeping it dependency-free means the GitHub Actions job needs
 no install step beyond torch/pandas.
 
-The service-role key bypasses RLS by design -- the 5-minute job has to write
-rows for every user. It must never reach the browser; it lives only in a GitHub
-Actions secret. The dashboard uses the anon key and is fenced by RLS.
+The service-role key bypasses RLS by design -- the daily job is the only
+writer. It must never reach the browser; it lives only in a GitHub Actions
+secret and the gitignored .env. The dashboard uses the anon key, read-only by RLS.
 """
 
 import json
@@ -78,10 +78,12 @@ class DB:
             path += f"&limit={limit}"
         return self._request("GET", path) or []
 
-    def insert(self, table: str, rows, upsert_on: str | None = None) -> list:
+    def insert(self, table: str, rows, upsert_on: str | None = None,
+               keep_existing: bool = False) -> list:
+        """upsert_on: overwrite rows that clash on that key; keep_existing: skip them."""
         prefer = "return=representation"
         if upsert_on:
-            prefer += f",resolution=merge-duplicates"
+            prefer += ",resolution=" + ("ignore-duplicates" if keep_existing else "merge-duplicates")
         path = f"{table}?on_conflict={upsert_on}" if upsert_on else table
         return self._request("POST", path, rows, prefer=prefer) or []
 
@@ -94,7 +96,7 @@ class DB:
 
     def ping(self) -> bool:
         """Cheap reachability and auth check."""
-        self._request("GET", "decisions?select=id&limit=1")
+        self._request("GET", "etf_runs?select=id&limit=1")
         return True
 
 
@@ -117,18 +119,22 @@ def _self_check() -> None:
         return []
 
     db._request = fake
-    db.select("decisions", "order=candle_time.desc", limit=5)
-    assert seen["path"] == "decisions?order=candle_time.desc&limit=5", seen["path"]
+    db.select("etf_decisions", "order=date.desc", limit=5)
+    assert seen["path"] == "etf_decisions?order=date.desc&limit=5", seen["path"]
 
-    db.insert("decisions", {"a": 1}, upsert_on="candle_time")
-    assert seen["path"] == "decisions?on_conflict=candle_time"
+    db.insert("etf_equity", {"a": 1}, upsert_on="date")
+    assert seen["path"] == "etf_equity?on_conflict=date"
     assert "merge-duplicates" in seen["prefer"], seen["prefer"]
 
-    db.insert("positions", {"a": 1})
-    assert seen["path"] == "positions" and "merge-duplicates" not in seen["prefer"]
+    # Decisions are written once and never overwritten.
+    db.insert("etf_decisions", {"a": 1}, upsert_on="date", keep_existing=True)
+    assert "ignore-duplicates" in seen["prefer"] and "merge" not in seen["prefer"], seen["prefer"]
 
-    db.update("positions", "id=eq.7", {"status": "CLOSED"})
-    assert seen["method"] == "PATCH" and seen["path"] == "positions?id=eq.7"
+    db.insert("etf_runs", {"a": 1})
+    assert seen["path"] == "etf_runs" and "resolution" not in seen["prefer"]
+
+    db.update("etf_orders", "id=eq.7", {"status": "filled"})
+    assert seen["method"] == "PATCH" and seen["path"] == "etf_orders?id=eq.7"
 
     # load_env must not clobber a real environment variable (CI secrets win).
     import tempfile

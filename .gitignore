@@ -1,24 +1,19 @@
-# Data is rebuilt from data.binance.vision by ml/fetch_history.py -- 160MB of it,
-# and it would be stale the moment it was committed.
+# Local caches and backups; the daily job fetches fresh prices every run.
 data/
 artifacts/
-# models/ is tracked on purpose: the promoted checkpoint is ~245KB and
-# versioning it with the code keeps every decision reproducible.
-!models/
-kaggle/code/*.py
 
 # Secrets. Nothing here should ever exist, but make it impossible by accident.
 .env
 .env.*
 *.key
 access_token
-kaggle.json
 
 __pycache__/
 *.pyc
 .venv/
 node_modules/
 .next/
+.playwright-mcp/
 
 # Next.js
 web/.next/

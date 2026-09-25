@@ -1,5 +1,4 @@
 pandas>=2.2
 numpy>=2.0
-pyarrow>=16
-requests>=2.32
-torch>=2.4
+# research only (ml/etf_research.py's machine-learning candidate):
+# scikit-learn>=1.5

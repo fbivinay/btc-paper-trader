@@ -48,6 +48,9 @@ class EtfCosts:
     band: float = 0.2         # smallest weight change worth a trade
 
 
+GROSS = EtfCosts(slab=0.0, ltcg=0.0, cost=0.0, fx=0.0, cash_fee=0.0)   # before tax and charges
+
+
 @dataclass
 class EtfResult:
     equity: pd.Series
@@ -160,19 +163,20 @@ def simulate(opens: pd.DataFrame, closes: pd.DataFrame, weights: pd.DataFrame,
             for a in np.flatnonzero(go & (want < cur)):       # sell first, to fund the buys
                 units = held[a] if want[a] == 0 else (cur[a] - want[a]) * total / O[i, a]
                 px = O[i, a] * (1 - costs.cost)
+                realized = 0.0
                 for proceeds, gain, long_term in _sell_fifo(lots[a], units, px, day[i]):
                     if long_term: lt += gain
                     else:         st += gain
                     hold = (costs.ltcg if long_term else costs.slab) * max(gain, 0.0)
-                    cash += proceeds - hold; reserve += hold
-                trades.append((idx[i], names[a], "SELL", units, px))
+                    cash += proceeds - hold; reserve += hold; realized += gain
+                trades.append((idx[i], names[a], "SELL", units, px, realized))
             for a in np.flatnonzero(go & (want > cur)):
                 spend = min(cash, (want[a] - cur[a]) * total)
                 if spend > 0:
                     px = O[i, a] * (1 + costs.cost)
                     lots[a].append([spend / px, spend, day[i]])
                     cash -= spend
-                    trades.append((idx[i], names[a], "BUY", spend / px, px))
+                    trades.append((idx[i], names[a], "BUY", spend / px, px, 0.0))
 
         hs, hl, value = st, lt, 0.0                   # liquidation value at the close
         for a in range(k):
@@ -185,8 +189,16 @@ def simulate(opens: pd.DataFrame, closes: pd.DataFrame, weights: pd.DataFrame,
         equity[i] = (cash + reserve + value - tax_now) * (1 - costs.fx)
 
     return EtfResult(pd.Series(equity, index=idx),
-                     pd.DataFrame(trades, columns=["date", "etf", "side", "units", "price"]),
+                     pd.DataFrame(trades, columns=["date", "etf", "side", "units", "price", "gain"]),
                      tax_paid, capital)
+
+
+def run(prices: dict, weights: dict, rate: pd.Series | None = None, start=None, end=None,
+        expense: dict | None = None, costs: EtfCosts = EtfCosts(), capital: float = 100.0) -> EtfResult:
+    """simulate() from {etf: DataFrame(open, close)} and {etf: weight Series}, between two dates."""
+    o = pd.DataFrame({k: p["open"] for k, p in prices.items()}).loc[start:end].dropna()
+    c = pd.DataFrame({k: p["close"] for k, p in prices.items()}).loc[o.index]
+    return simulate(o, c, pd.DataFrame(weights).reindex(o.index), rate, expense, capital, costs)
 
 
 def _self_check() -> None:

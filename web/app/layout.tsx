@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "BTC Paper Trader",
+  title: "Bitcoin ETF Trend Model",
   description:
-    "Autonomous BTC paper trading: LSTM prediction, walk-forward validation, deterministic risk engine.",
+    "A daily trend model for a spot Bitcoin ETF, gold and T-bills: paper portfolio on real prices, after Indian tax and charges, next to buy & hold.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
